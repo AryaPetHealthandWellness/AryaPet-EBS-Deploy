@@ -17,6 +17,9 @@ dependencies = [
     # Self-hosted document classification/extraction (app/services/document_classifier.py).
     # Small model (en_core_web_sm, ~15MB) - downloaded in the Dockerfile, not via pip.
     "spacy>=3.7",
+    # preshed 3.0.14 (spaCy's hash-table dep) breaks model loading: Tokenizer.from_disk
+    # raises "OverflowError: Python int too large to convert to C ssize_t". Lift once fixed.
+    "preshed<3.0.14",
     # Reads lab tables from the PDF's own geometry rather than flattened OCR text
     # (app/services/pdf_table_extractor.py). Pure Python on pdfminer.six; measured
     # at ~38MB peak RSS per document, so it stays within the t3.micro budget.
