@@ -92,10 +92,24 @@ jobs:
             --region "${AWS_REGION}"
 
       - name: Wait for environment update to finish
+        # Not `aws elasticbeanstalk wait environment-updated`: its fixed ~6.5 min budget
+        # (20 x 20s) is shorter than the on-instance Docker build (spaCy + model download
+        # on a t3.micro), so it gave up while the update was still progressing.
         run: |
-          aws elasticbeanstalk wait environment-updated \
-            --environment-names "${EB_ENVIRONMENT_NAME}" \
-            --region "${AWS_REGION}"
+          for i in $(seq 1 60); do
+            STATUS=$(aws elasticbeanstalk describe-environments \
+              --environment-names "${EB_ENVIRONMENT_NAME}" \
+              --region "${AWS_REGION}" \
+              --query 'Environments[0].Status' --output text)
+            if [ "$STATUS" = "Ready" ]; then
+              echo "Environment is Ready"
+              exit 0
+            fi
+            echo "Environment status: $STATUS, waiting ($i/60)..."
+            sleep 20
+          done
+          echo "::error::Environment still not Ready after 20 minutes"
+          exit 1
 
       - name: Verify environment health
         run: |
