@@ -158,6 +158,11 @@ _VALUE_RANGE_RE = re.compile(
 _UNIT_RE = re.compile(r"\b(g/dl|mg/dl|u/l|iu/l|mmol/l|umol/l)\b", re.IGNORECASE)
 _RANGE_BOUNDS_RE = re.compile(r"([\d.]+)\s*[–\-—−]\s*([\d.]+)")
 
+# "Creatinine 0.6 – 1.4 mg/dl" followed by "1.5" on its own line: some labs' text layer
+# emits the value cell after the range cell. Recognised so the row isn't lost.
+_RANGE_ONLY_ROW_RE = re.compile(r"^(?P<name>.*[A-Za-z].*?)\s+(?P<range>[\d.]+\s*[–\-—−]\s*[\d.]+.*)$")
+_LONE_VALUE_RE = re.compile(r"^[<>]?\d+\.?\d*$")
+
 
 def _is_section_title(line: str) -> bool:
     # Real section titles in these reports are printed fully capitalized
@@ -190,7 +195,30 @@ def _section_value_range_block(lines: list[str]) -> str:
         if line.startswith("*") or lower.startswith(("note", "dr.", "m.v.")):
             break
         kept.append(line)
-    return " ".join(kept)
+    return " ".join(_reorder_trailing_values(kept))
+
+
+def _reorder_trailing_values(lines: list[str]) -> list[str]:
+    """Rewrites "<name> <range>" + "<value>" line pairs as "<name> <value> <range>" so
+    the row regex sees the usual order. Only applies when the name doesn't already end
+    in a number, i.e. the row really has no value of its own."""
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        m = _RANGE_ONLY_ROW_RE.match(line)
+        if (
+            m is not None
+            and i + 1 < len(lines)
+            and _LONE_VALUE_RE.match(lines[i + 1])
+            and not _LONE_VALUE_RE.match(m.group("name").split()[-1])
+        ):
+            out.append(f"{m.group('name')} {lines[i + 1]} {m.group('range')}")
+            i += 2
+            continue
+        out.append(line)
+        i += 1
+    return out
 
 
 def _extract_section_parameters(block: str) -> list[dict[str, Any]]:
@@ -231,6 +259,12 @@ def _is_abnormal(value: str, normal_range: str) -> bool:
     except ValueError:
         return False
     return val < low or val > high
+
+
+def extract_lab_sections(text: str) -> list[dict[str, Any]]:
+    """Lab table sections parsed from flattened text - the fallback when there's no PDF
+    geometry (photos). Used by app/services/record_extractor.py."""
+    return _extract_lab_sections(text)
 
 
 def _extract_lab_sections(text: str) -> list[dict[str, Any]]:

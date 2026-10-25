@@ -84,7 +84,7 @@ def _document(s3_key: str, raw_text: str | None = None, status=DocumentStatus.PE
 
 
 _SETTINGS = SimpleNamespace(documents_bucket="bucket", aws_region="ap-south-1")
-_PDF_CARD = {"type": "lab_report", "sections": [{"title": "LFT", "parameters": []}]}
+_PDF_CARD = {"document_type": "lab_report", "parameters": []}
 
 
 @pytest.mark.asyncio
@@ -94,7 +94,7 @@ async def test_pdf_with_a_table_completes_without_any_client_text(monkeypatch):
         return b"%PDF"
 
     monkeypatch.setattr(processing_consumer, "_fetch_pdf_bytes", fake_fetch)
-    monkeypatch.setattr(processing_consumer, "build_card_from_pdf", lambda _: _PDF_CARD)
+    monkeypatch.setattr(processing_consumer, "build_record_from_pdf", lambda *_: _PDF_CARD)
 
     document = _document("user/report.pdf", raw_text=None)
     session = _Session()
@@ -120,46 +120,60 @@ async def test_photo_without_text_waits_for_redelivery():
 @pytest.mark.asyncio
 async def test_photo_with_text_completes_from_the_text(monkeypatch):
     monkeypatch.setattr(
-        processing_consumer, "build_document_card", lambda text: {"type": "lab_report"}
+        processing_consumer, "build_record_from_text", lambda text: {"document_type": "lab_report"}
     )
     document = _document("user/photo.jpg", raw_text="LIVER FUNCTION TEST ...")
     session = _Session()
 
     assert await _process_document(document, session, _SETTINGS) is True
     assert document.status == DocumentStatus.COMPLETED
-    assert document.parsed_result["extraction"] == {
-        "source": "text",
-        "strategy": "flattened_text",
-    }
+    assert document.parsed_result == {"document_type": "lab_report"}
 
 
 @pytest.mark.asyncio
-async def test_pdf_without_a_table_falls_back_to_text_once_it_arrives(monkeypatch):
+async def test_pdf_hands_the_client_text_over_as_a_fallback(monkeypatch):
+    # The PDF's own text layer is used first (inside build_record_from_pdf); the
+    # client's OCR text is passed along for scanned PDFs that have none.
+    async def fake_fetch(*_):
+        return b"%PDF"
+
+    seen = {}
+
+    def fake_build(pdf_bytes, fallback_text):
+        seen["fallback_text"] = fallback_text
+        return {"document_type": "vet_visit"}
+
+    monkeypatch.setattr(processing_consumer, "_fetch_pdf_bytes", fake_fetch)
+    monkeypatch.setattr(processing_consumer, "build_record_from_pdf", fake_build)
+
+    document = _document("user/letter.pdf", raw_text="Diagnosis: otitis externa.")
+    assert await _process_document(document, _Session(), _SETTINGS) is True
+    assert seen["fallback_text"] == "Diagnosis: otitis externa."
+    assert document.parsed_result["document_type"] == "vet_visit"
+
+
+@pytest.mark.asyncio
+async def test_scanned_pdf_without_text_waits_for_redelivery(monkeypatch):
+    # No text layer and no table: nothing to work from until the client's OCR arrives.
     async def fake_fetch(*_):
         return b"%PDF"
 
     monkeypatch.setattr(processing_consumer, "_fetch_pdf_bytes", fake_fetch)
-    monkeypatch.setattr(processing_consumer, "build_card_from_pdf", lambda _: None)
-    monkeypatch.setattr(
-        processing_consumer, "build_document_card", lambda text: {"type": "vet_visit"}
-    )
+    monkeypatch.setattr(processing_consumer, "build_record_from_pdf", lambda *_: None)
 
-    no_text = _document("user/letter.pdf", raw_text=None)
-    assert await _process_document(no_text, _Session(), _SETTINGS) is False
-
-    with_text = _document("user/letter.pdf", raw_text="Diagnosis: otitis externa.")
-    assert await _process_document(with_text, _Session(), _SETTINGS) is True
-    assert with_text.parsed_result["type"] == "vet_visit"
+    document = _document("user/scan.pdf", raw_text=None)
+    assert await _process_document(document, _Session(), _SETTINGS) is False
+    assert document.status == DocumentStatus.PENDING
 
 
 @pytest.mark.asyncio
 async def test_already_completed_document_is_not_reprocessed(monkeypatch):
     # A redelivered event arriving after the document finished must not redo the work
     # or overwrite the stored result.
-    def must_not_run(_):
+    def must_not_run(*_):
         raise AssertionError("reprocessed a completed document")
 
-    monkeypatch.setattr(processing_consumer, "build_card_from_pdf", must_not_run)
+    monkeypatch.setattr(processing_consumer, "build_record_from_pdf", must_not_run)
     document = _document("user/report.pdf", status=DocumentStatus.COMPLETED)
     document.parsed_result = {"kept": True}
 
@@ -174,7 +188,7 @@ async def test_a_failing_pdf_still_uses_text_when_present(monkeypatch):
 
     monkeypatch.setattr(processing_consumer, "_fetch_pdf_bytes", broken_fetch)
     monkeypatch.setattr(
-        processing_consumer, "build_document_card", lambda text: {"type": "lab_report"}
+        processing_consumer, "build_record_from_text", lambda text: {"document_type": "lab_report"}
     )
     document = _document("user/report.pdf", raw_text="some text")
 

@@ -9,7 +9,9 @@ queue and doesn't need one - uploads are the trigger.
 That timing suits the two kinds of document differently:
 
   PDFs are processed straight away. Their tables are read from the file's own
-  geometry (pdf_table_extractor), which needs nothing from the client.
+  geometry and their wording from the file's own text layer (pdf_table_extractor),
+  which needs nothing from the client. Only a scanned PDF with no text layer waits
+  for the client's OCR text, like a photo.
 
   Photos have no geometry, only the OCR text the client submits afterwards via
   POST /documents/{id}/text - which may not have arrived when the S3 event does.
@@ -36,7 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.config import build_database_url, get_settings
 from app.db.models.document import Document, DocumentStatus
 from app.db.session import get_session_maker, init_engine
-from app.services.document_classifier import build_card_from_pdf, build_document_card
+from app.services.record_extractor import build_record_from_pdf, build_record_from_text
 
 logger = logging.getLogger(__name__)
 
@@ -74,23 +76,24 @@ async def _fetch_pdf_bytes(s3_key: str, bucket: str, region: str) -> bytes:
 
 
 async def _build_card(document: Document, settings: Any) -> dict[str, Any] | None:
-    """Prefers the uploaded PDF's own table geometry over flattened OCR text: the
-    text has already lost the column positions that say which value belongs to
-    which analyte.
+    """Builds the form-shaped record (app/services/record_extractor.py). For a PDF it
+    prefers the file's own table geometry and text layer over the client's flattened
+    OCR text, which has already lost the column positions that say which value
+    belongs to which analyte.
 
-    Returns None when there's nothing to work from *yet* - a photo, or a PDF with
-    no recognizable table, whose OCR text the client hasn't submitted - so the
-    caller can wait for it instead of recording an empty result."""
+    Returns None when there's nothing to work from *yet* - a photo, or a scanned
+    PDF, whose OCR text the client hasn't submitted - so the caller can wait for it
+    instead of recording an empty result."""
     s3_key = document.s3_key or ""
     if s3_key.lower().endswith(".pdf"):
         try:
             pdf_bytes = await _fetch_pdf_bytes(
                 s3_key, settings.documents_bucket, settings.aws_region
             )
-            card = await asyncio.to_thread(build_card_from_pdf, pdf_bytes)
+            card = await asyncio.to_thread(build_record_from_pdf, pdf_bytes, document.raw_text)
             if card is not None:
                 return card
-            logger.info("No table found in PDF for document %s", document.id)
+            logger.info("PDF for document %s has no text layer or table", document.id)
         except Exception:
             # A missing/corrupt object or an unparseable PDF shouldn't fail the whole
             # document when there may still be OCR text to fall back on.
@@ -99,9 +102,7 @@ async def _build_card(document: Document, settings: Any) -> dict[str, Any] | Non
     if not (document.raw_text or "").strip():
         return None
 
-    card = await asyncio.to_thread(build_document_card, document.raw_text)
-    card.setdefault("extraction", {"source": "text", "strategy": "flattened_text"})
-    return card
+    return await asyncio.to_thread(build_record_from_text, document.raw_text)
 
 
 async def _process_document(

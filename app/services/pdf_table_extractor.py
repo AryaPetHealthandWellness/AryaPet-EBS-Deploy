@@ -185,6 +185,15 @@ def _sections_from_page(page: Any, tables: list[list[list[str]]]) -> list[dict[s
     return sections
 
 
+def extract_pdf_text(pdf_bytes: bytes) -> str:
+    """The PDF's own text layer, page by page. Empty for a scanned PDF (image only),
+    which then needs the client's OCR text instead."""
+    import pdfplumber
+
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        return "\n".join(page.extract_text() or "" for page in pdf.pages)
+
+
 def extract_lab_sections_from_pdf(pdf_bytes: bytes) -> tuple[list[dict[str, Any]], str | None]:
     """Returns (sections, strategy). `strategy` names the tier that produced the
     result ("ruled_lines" / "word_positions") so callers can record how often the
