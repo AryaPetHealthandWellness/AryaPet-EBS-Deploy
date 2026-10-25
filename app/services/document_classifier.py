@@ -164,6 +164,7 @@ _RANGE_ONLY_ROW_RE = re.compile(r"^(?P<name>.*[A-Za-z].*?)\s+(?P<range>[\d.]+\s*
 _LONE_VALUE_RE = re.compile(r"^[<>]?\d+\.?\d*$")
 
 
+
 def _is_section_title(line: str) -> bool:
     # Real section titles in these reports are printed fully capitalized
     # ("LIVER FUNCTION TEST"); requiring that rules out ordinary prose that
