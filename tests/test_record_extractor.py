@@ -285,3 +285,87 @@ def test_discharge_summary_separates_procedure_from_diagnosis():
     assert card["primary_diagnosis"] == "Pyometra"
     assert card["procedures"] == ["Ovariohysterectomy under general anaesthesia"]
     assert card["clinical_directives"] == ["Keep the e-collar on.", "Suture removal after 10 days."]
+
+
+# A real histopathology report's text layer (DiagnoPet), names replaced. The letterhead
+# is an image, so the text starts at the patient block; page 2 is the lab's conditions.
+_BIOPSY_TEXT = """\
+NAME : DOG DAISY AGE/GENDER: 9 LAB ID :
+years/Female
+BREED : Indie 001723225
+DATE : Aug. 20, 2025
+SPECIES : CANINE
+REF BY : Dr. A Referrer, M.V.Sc, PhD
+(DOG)
+Test Description Value(s) Unit(s) Reference Range
+HISTOPATHOLOGY, BIOPSY SOFT TISSUE
+HISTORY : Swelling at right stifle joint.
+LOCATION OF SAMPLE : Stifle joint.
+PATHOLOGIST INTERPRETATION : Mast cell tumour, Low Grade
+MICROSCOPIC DESCRIPTION :
+Infiltrating, separating, and surrounding collagen bundles was an
+unencapsulated, poorly circumscribed neoplasm of low cellularity.
+mitotic figures average less than 3 per 10 high power field (mitotic index <2/hpf).
+- End of Report -
+Page 1 of 2
+CONDITIONS OF REPORTING
+It is presumed that the tests performed on the specimen belong to the patient; named or identified.
+Test results are not valid for medico or vetro-legal purposes.
+Page 2 of 2
+"""
+
+
+def test_biopsy_report_fills_the_form_from_its_labels():
+    card = build_record_card(_BIOPSY_TEXT)
+    assert card["document_type"] == "lab_report"
+    assert card["visit_date"] == "2025-08-20"
+    assert card["document_title"] == "Histopathology, Biopsy Soft Tissue"
+    assert card["primary_diagnosis"] == "Mast cell tumour, Low Grade"
+    assert card["symptoms"] == ["Swelling at right stifle joint"]
+    assert card["parameters"] == []
+    notes = card["clinical_notes"].split("\n")
+    assert notes[0] == "Location of sample: Stifle joint."
+    # Wrapped description lines are one paragraph, and the footer isn't part of it.
+    assert notes[1].startswith("Microscopic description: Infiltrating, separating")
+    assert notes[1].endswith("(mitotic index <2/hpf).")
+    assert len(notes) == 2
+
+
+def test_patient_fields_are_never_the_provider():
+    # "LAB ID :" says "lab" but is a patient field; the letterhead here is an image.
+    assert build_record_card(_BIOPSY_TEXT)["clinic_provider"] is None
+
+
+# A generated PDF whose text layer runs bottom-up, so header fields follow "Diagnosis:".
+_REVERSED_VISIT_TEXT = """\
+Notes: All vitals normal. Next visit in 12 months.
+Medications: Heartgard 30mg SID
+Diagnosis: Annual wellness exam - healthy
+Patient: Simba
+Date: 15/06/2026
+Clinic: Happy Paws Veterinary Centre
+VETERINARY CLINIC REPORT
+"""
+
+
+def test_header_fields_end_the_section_before_them():
+    card = build_record_card(_REVERSED_VISIT_TEXT)
+    assert card["primary_diagnosis"] == "Annual wellness exam - healthy"
+    assert card["clinic_provider"] == "Happy Paws Veterinary Centre"
+    assert card["visit_date"] == "2026-06-15"
+    assert card["document_title"] == "Veterinary Clinic Report"
+
+
+def test_visit_with_medicines_is_a_visit_and_next_visit_is_a_directive():
+    card = build_record_card(_REVERSED_VISIT_TEXT)
+    assert card["document_type"] == "vet_visit"
+    assert card["medications"][0]["drug_name"] == "Heartgard"
+    assert card["clinical_notes"] == "All vitals normal."
+    assert card["clinical_directives"] == ["Next visit in 12 months."]
+
+
+def test_filled_in_next_visit_line_is_kept_and_a_blank_one_is_not():
+    filled = build_record_card("Diagnosis: Otitis externa\nNext Visit on: 21.10.2025\n")
+    assert filled["clinical_directives"] == ["Next Visit on: 21.10.2025"]
+    blank = build_record_card("Diagnosis: Otitis externa\nNext Visit on: _________________\n")
+    assert blank["clinical_directives"] == []

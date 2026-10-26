@@ -78,10 +78,18 @@ def _is_boilerplate(line: str) -> bool:
 # ── Labelled sections ("Complaint ...", "Diagnosis: ...") ─────────────────
 
 _SECTION_LABELS: dict[str, str] = {
-    "complaint": r"(?:chief |presenting )?complaints?|reason for visit|presenting signs|c/o",
+    "complaint": r"(?:chief |presenting )?complaints?|reason for visit|presenting signs|c/o|"
+    r"(?:clinical |case )?history",
+    # Pathology (histopathology / cytology) labels. Their printed name is kept with the
+    # text - "Stifle joint." means nothing in the notes without "Location of sample".
+    "pathology": r"location of (?:the )?(?:sample|specimen|lesion)|(?:sample|specimen|biopsy) "
+    r"(?:site|location)|site of (?:sample|biopsy|lesion)|nature of (?:sample|specimen)|"
+    r"(?:gross|microscopic|macroscopic) (?:description|findings|examination)|grading|grade",
     "observations": r"observations?|clinical findings|findings|physical exam(?:ination)?|"
     r"examination|vitals|study|views?|technique",
-    "diagnosis": r"(?:provisional |tentative |final |differential )?diagnosis|assessment|impression",
+    "diagnosis": r"(?:provisional |tentative |final |differential |histopatholog\w* |"
+    r"cytolog\w* |morphologic(?:al)? )?diagnosis|assessment|impression|"
+    r"pathologist'?s? (?:interpretation|opinion|comments?)|conclusion",
     "notes": r"notes|plan|treatment(?: plan)?|advice|recommendations?|instructions",
     "medications": r"rx|prescription|medications?|medicines|drugs prescribed",
     "results_notes": r"remarks?|comments?|interpretation",
@@ -94,10 +102,21 @@ _LABEL_RES = {
 }
 # A block ends at these even when no new label follows.
 _BLOCK_END_RE = re.compile(r"^(next visit|authori[sz]ed|end of report|\*{3,}|_{3,})", re.IGNORECASE)
+# "Next visit on: 21.10.2025" is itself a follow-up instruction, not just a block end.
+_FOLLOW_UP_LINE_RE = re.compile(r"^(?:next (?:visit|review|vaccination)|follow[- ]?up)\b", re.IGNORECASE)
+# Patient/header fields ("Patient: Simba", "Date: 15/06/2026", "Clinic: ..."). When a
+# document's text runs bottom-up they follow "Diagnosis:" directly and would otherwise
+# be read as more of the diagnosis.
+_HEADER_FIELD_RE = re.compile(
+    r"^(?:patient|pet|owner|parent|name|date|clinic|hospital|doctor|dr|vet|veterinarian|consultant|"
+    r"breed|species|age|sex|gender|lab id|ref(?:erred)? by|patient id|pet id)\b(?: name)?\s*[:\-]",
+    re.IGNORECASE,
+)
 
 
-def _section_label(line: str) -> tuple[str, str] | None:
-    """(section, text after the label) when the line opens a labelled section.
+def _section_label(line: str) -> tuple[str, str, str] | None:
+    """(section, printed label, text after the label) when the line opens a labelled
+    section.
 
     The label must be followed by a separator or by a capitalised word, so prose like
     "Treatment of the wound was..." isn't mistaken for a "Treatment" heading."""
@@ -107,7 +126,8 @@ def _section_label(line: str) -> tuple[str, str] | None:
             continue
         rest = m.group("rest").strip()
         if m.group("sep") or not rest or rest[0].isupper():
-            return key, rest
+            label = line[: m.start("sep") if m.group("sep") else m.start("rest")].strip()
+            return key, label, rest
     return None
 
 
@@ -117,15 +137,33 @@ def _labelled_sections(lines: list[str]) -> dict[str, list[str]]:
     for line in lines:
         label = _section_label(line)
         if label is not None:
-            current, rest = label
+            current, printed, rest = label
             sections.setdefault(current, [])
-            if rest:
+            if current == "pathology":
+                # One entry per label; wrapped lines are appended to it below.
+                sections[current].append(f"{printed.capitalize()}: {rest}".rstrip())
+            elif rest:
                 sections[current].append(rest)
             continue
-        if _BLOCK_END_RE.match(line) or _is_boilerplate(line):
+        follow_up = _FOLLOW_UP_LINE_RE.match(line)
+        if follow_up:
+            # Skip blank print-outs ("Next Visit on: ______") - nothing was written in.
+            filled_in = re.sub(r"^\s*(?:on|date|in)?\s*[:\-]?", "", line[follow_up.end() :])
+            if re.search(r"[A-Za-z0-9]", filled_in):
+                sections.setdefault("follow_up", []).append(line)
             current = None
             continue
-        if current is not None:
+        if _BLOCK_END_RE.match(line) or _is_boilerplate(line) or _HEADER_FIELD_RE.match(line):
+            current = None
+            continue
+        if _TITLE_RE.search(line) and len(line.split()) <= 6:
+            # A report heading ("VETERINARY CLINIC REPORT") is never section content.
+            current = None
+            continue
+        if current == "pathology":
+            # Pathology prose is wrapped across lines; keep it as one paragraph.
+            sections[current][-1] = f"{sections[current][-1]} {line}"
+        elif current is not None:
             sections[current].append(line)
     return sections
 
@@ -218,7 +256,13 @@ _TITLE_RE = re.compile(
     r"\b(clinical notes|consultation (?:notes|record|summary)|case sheet|discharge summary|"
     r"prescription|vaccination (?:certificate|record|card)|immuni[sz]ation record|"
     r"operative report|surgery report|surgical report|anaest?hesia record|"
-    r"radiology report|x-?ray report|ultrasound report|lab(?:oratory)? report|test report|invoice)\b",
+    r"radiology report|x-?ray report|ultrasound report|lab(?:oratory)? report|test report|invoice|"
+    r"clinic(?:al)? report|visit report|histopatholog\w*|cytolog(?:y|ical) (?:report|examination)|"
+    r"biopsy report|fnac report)\b",
+    re.IGNORECASE,
+)
+_PROVIDER_LABEL_RE = re.compile(
+    r"^(?:clinic|hospital|lab(?:oratory)?|provider|cent(?:re|er)|issued by)\s*(?:name)?\s*[:\-]\s*",
     re.IGNORECASE,
 )
 
@@ -227,6 +271,15 @@ def _find_provider(lines: list[str]) -> str | None:
     # Letterhead sits at the top; a clinic named in the body is usually a referral.
     for line in lines[:10]:
         if "@" in line or "www." in line.lower() or _is_boilerplate(line):
+            continue
+        labelled = _PROVIDER_LABEL_RE.match(line)
+        if labelled:
+            return line[labelled.end() :].strip() or None
+        # Patient fields ("LAB ID :") and the report's own heading ("SYNTHETIC
+        # VETERINARY LAB REPORT") name no provider, even when they say "lab".
+        if _HEADER_FIELD_RE.match(line) or re.search(r"\b(?:name|age|breed|species)\s*:", line, re.I):
+            continue
+        if _TITLE_RE.search(line):
             continue
         if _PROVIDER_RE.search(line):
             return line
@@ -240,7 +293,10 @@ def _find_title(lines: list[str], table_sections: list[dict[str, Any]]) -> str |
     for line in lines:
         m = _TITLE_RE.search(line)
         if m and not _is_boilerplate(line):
-            return m.group(1).title()
+            # A short heading is the title as printed ("Histopathology, Biopsy Soft
+            # Tissue"); in a longer line only the matched words are.
+            heading = line if len(line.split()) <= 6 and ":" not in line else m.group(1)
+            return heading.strip(" :-").title()
     return None
 
 
@@ -264,8 +320,10 @@ _TYPE_SIGNALS: dict[str, tuple[str, ...]] = {
         r"urinalysis|urine (?:routine|analysis|examination)",
         r"blood count|ha?emogram",
         r"thyroid (?:profile|panel)",
+        r"histopatholog\w*|cytolog(?:y|ical)|\bbiopsy\b|\bfnac\b",
+        r"\bpathologist\b",
     ),
-    "vet_visit": (r"clinical notes", r"consultation", r"case sheet"),
+    "vet_visit": (r"clinical notes", r"consultation", r"case sheet", r"clinic(?:al)? report|visit report"),
     "prescription": (r"^\s*rx\b", r"\bprescription\b"),
     "vaccination": (
         r"vaccination (?:certificate|record|card)",
@@ -317,8 +375,11 @@ def _classify(
             if titles and re.search(signal, titles, re.IGNORECASE | re.MULTILINE):
                 scores[doc_type] += 2
     # A visit note is recognised by its clinical headings more than by any word.
-    scores["vet_visit"] += sum(1 for key in ("complaint", "observations", "diagnosis") if key in sections)
-    if "medications" in sections:
+    visit_headings = sum(1 for key in ("complaint", "observations", "diagnosis") if key in sections)
+    scores["vet_visit"] += visit_headings
+    # Medicines listed under a visit's own diagnosis are that visit's treatment; only a
+    # medicine list standing alone reads as a prescription.
+    if "medications" in sections and not visit_headings:
         scores["prescription"] += 1
     if "procedures" in sections:
         scores["surgery"] += 1
@@ -465,7 +526,7 @@ _REPORT_LEADIN_RE = re.compile(
 )
 _DIRECTIVE_RE = re.compile(
     r"\b(review|follow[- ]?up|re-?check|revisit|return|come back|repeat|continue|call|contact|"
-    r"avoid|keep|apply|give|administer|monitor|restrict|schedule|book|removal|remove)\b",
+    r"avoid|keep|apply|give|administer|monitor|restrict|schedule|book|removal|remove|next visit)\b",
     re.IGNORECASE,
 )
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=\.)\s+(?=[A-Z])")
@@ -640,9 +701,11 @@ def build_record_card(
 
     medications = [m for m in (_medication(line) for line in sections.get("medications", [])) if m]
 
+    directives += sections.get("follow_up", [])
+
     clinical_notes = complaint_leftover + [
         line for line in sections.get("observations", []) if line not in pair_lines
-    ] + notes
+    ] + sections.get("pathology", []) + notes
     diagnosis = " ".join(sections.get("diagnosis", [])).strip()
     results_notes = " ".join(sections.get("results_notes", [])).strip()
 
