@@ -283,21 +283,154 @@ def _find_provider(lines: list[str]) -> str | None:
             continue
         if _PROVIDER_RE.search(line):
             return line
-    return None
-
-
-def _find_title(lines: list[str], table_sections: list[dict[str, Any]]) -> str | None:
-    titles = [s["title"] for s in table_sections if s.get("title")]
-    if titles:
-        return "; ".join(dict.fromkeys(titles))
+    # Labs whose letterhead is an image often name themselves only in their printed
+    # conditions ("Neither DiagnoPet, nor its employees ...").
     for line in lines:
-        m = _TITLE_RE.search(line)
-        if m and not _is_boilerplate(line):
-            # A short heading is the title as printed ("Histopathology, Biopsy Soft
-            # Tissue"); in a longer line only the matched words are.
-            heading = line if len(line.split()) <= 6 and ":" not in line else m.group(1)
-            return heading.strip(" :-").title()
+        m = _SELF_NAMING_RE.search(line)
+        if m:
+            return (m.group("name") or m.group("name2")).strip(" ,.")
     return None
+
+
+_SELF_NAMING_RE = re.compile(
+    r"\b(?i:neither) (?P<name>[A-Z][\w&.'-]*(?: [A-Z][\w&.'-]*){0,3}),? nor (?:its|their)\b|"
+    r"\b(?i:thank you for choosing) (?P<name2>[A-Z][\w&.'-]*(?: [A-Z][\w&.'-]*){0,3})"
+)
+
+
+# Headings naming a kind of document beyond _TITLE_RE's fixed phrases ("Abdominal
+# Ultrasonography", "Stool Examination", "SNAP 4Dx Plus Test", "Dental Chart").
+_KIND_WORD_RE = re.compile(
+    r"\b(report|test|profile|panel|examination|analysis|summary|certificate|chart|record|card|"
+    r"notes|count|biochemistry|ha?ematology|urinalysis|ultrasonograph\w*|ultrasound|sonograph\w*|"
+    r"echocardiograph\w*|radiograph\w*|x-?ray|scan|ecg|histopatholog\w*|cytolog\w*|biopsy|"
+    r"prescription|invoice)\b",
+    re.IGNORECASE,
+)
+# Headings that say what kind of document it is but nothing about this one - every
+# visit would otherwise be titled "Clinical Notes".
+_GENERIC_TITLE_RE = re.compile(
+    r"^(?:clinical notes|consultation(?: notes| record| summary)?|case sheet|"
+    r"(?:veterinary )?clinic(?:al)? report|visit report|lab(?:oratory)? report|test report|"
+    r"prescription|rx)$",
+    re.IGNORECASE,
+)
+# Kept in capitals when an all-capitals heading is re-cased.
+_ACRONYMS = {
+    "CBC", "LFT", "KFT", "RFT", "ALT", "AST", "ALP", "BUN", "ECG", "EKG", "MRI", "CT", "PCR",
+    "ELISA", "SNAP", "FNAC", "CRP", "TSH", "T3", "T4", "FT4", "USG", "UTI", "DNA", "RBC", "WBC",
+}
+_SMALL_WORDS = {"of", "and", "&", "for", "the", "in", "on", "with", "to"}
+_TITLE_TYPE_NAMES = {
+    "vet_visit": "Consultation",
+    "lab_report": "Lab Report",
+    "prescription": "Prescription",
+    "vaccination": "Vaccination Record",
+    "surgery": "Surgery Report",
+}
+
+
+def _heading_case(line: str) -> str:
+    """An all-capitals heading in Title Case with its abbreviations intact ("CBC",
+    "SNAP 4Dx"); anything else is kept as printed, bar abbreviations an earlier step
+    already re-cased ("Cbc")."""
+    letters = [c for c in line if c.isalpha()]
+    if not letters or not all(c.isupper() for c in letters):
+        return " ".join(
+            w.upper() if w.strip("(),.:;").upper() in _ACRONYMS else w for w in line.split()
+        )
+
+    def word(w: str, first: bool) -> str:
+        core = w.strip("(),.:;")
+        if core.upper() in _ACRONYMS or any(c.isdigit() for c in core):
+            return w
+        if not first and core.lower() in _SMALL_WORDS:
+            return w.lower()
+        return "-".join(part[:1].upper() + part[1:].lower() for part in w.split("-"))
+
+    return " ".join(word(w, i == 0) for i, w in enumerate(line.split()))
+
+
+def _is_letterhead(line: str) -> bool:
+    """A clinic or lab name, even one ending in "Laboratory Report"."""
+    rest = _TITLE_RE.sub("", line)
+    return bool(_PROVIDER_RE.search(rest)) and len(rest.split()) >= 2
+
+
+def _printed_heading(lines: list[str]) -> str | None:
+    """The document's own heading near the top, as printed."""
+    for line in lines[:15]:
+        if _is_boilerplate(line) or _HEADER_FIELD_RE.match(line) or _is_letterhead(line):
+            continue
+        if ":" in line or not (1 <= len(line.split()) <= 8) or _section_label(line):
+            continue
+        # Table column headings ("Test Description Value(s) Unit(s) Reference Range").
+        if is_header_line(line):
+            continue
+        if _TITLE_RE.search(line) or _KIND_WORD_RE.search(line) or is_panel_title(line):
+            return line.strip(" :-")
+    # A heading sharing its line with a field ("Clinical Notes Date: 16 Dec, 2022").
+    for line in lines[:15]:
+        m = _TITLE_RE.search(line)
+        if m and not _is_boilerplate(line) and not _is_letterhead(line):
+            return m.group(1)
+    return None
+
+
+def _join_panels(titles: list[str]) -> str:
+    """"Liver Function Test" + "Kidney Function Test" -> "Liver & Kidney Function Tests"."""
+    if len(titles) == 1:
+        return titles[0]
+    words = [t.split() for t in titles]
+    shared = 0
+    while all(len(w) > shared + 1 for w in words) and len({w[-1 - shared].lower() for w in words}) == 1:
+        shared += 1
+    if shared:
+        heads = [" ".join(w[:-shared]) for w in words]
+        tail = " ".join(words[0][-shared:])
+        tail = tail if tail.endswith("s") else tail + "s"
+        return f"{', '.join(heads[:-1])} & {heads[-1]} {tail}"
+    return f"{', '.join(titles[:-1])} & {titles[-1]}"
+
+
+def _subject(diagnosis: str | None) -> str | None:
+    """The gist of a diagnosis for a title: "Hematoma due to allergic reaction..." ->
+    "Hematoma"."""
+    if not diagnosis:
+        return None
+    gist = re.split(r"\s+(?:due to|secondary to|caused by|because of|with)\b|\s+-\s+|[,;.(]", diagnosis)[0]
+    words = gist.split()
+    return " ".join(words[:6]) if words else None
+
+
+def _find_title(
+    lines: list[str],
+    table_sections: list[dict[str, Any]],
+    document_type: str | None,
+    diagnosis: str | None,
+    medications: list[dict[str, Any]],
+) -> str | None:
+    panels = list(dict.fromkeys(s["title"] for s in table_sections if s.get("title")))
+    if panels:
+        return _join_panels([_heading_case(t) for t in panels])
+
+    heading = _printed_heading(lines)
+    if heading and not _GENERIC_TITLE_RE.match(heading):
+        return _heading_case(heading)
+
+    # Generic or no heading: say what this one is about.
+    is_prescription = document_type == "prescription" or (
+        heading is not None and heading.lower() in ("rx", "prescription")
+    )
+    if is_prescription:
+        base = "Prescription"
+        subject = medications[0]["drug_name"] if medications else _subject(diagnosis)
+    else:
+        base = _heading_case(heading) if heading else _TITLE_TYPE_NAMES.get(document_type or "")
+        subject = _subject(diagnosis)
+    if base is None:
+        return None
+    return f"{base} - {subject}" if subject else base
 
 
 # ── Document type ──────────────────────────────────────────────────────────
@@ -318,6 +451,7 @@ _TYPE_SIGNALS: dict[str, tuple[str, ...]] = {
         r"rapid test|snap test",
         r"\bantigen\b|\bantibod(?:y|ies)\b|\belisa\b|\bpcr\b",
         r"urinalysis|urine (?:routine|analysis|examination)",
+        r"stool (?:examination|test|analysis)|fa?ecal (?:examination|test|analysis|flotation)",
         r"blood count|ha?emogram",
         r"thyroid (?:profile|panel)",
         r"histopatholog\w*|cytolog(?:y|ical)|\bbiopsy\b|\bfnac\b",
@@ -342,6 +476,8 @@ _TYPE_SIGNALS: dict[str, tuple[str, ...]] = {
         r"radiograph",
         r"x-?ray report",
         r"ultrasound report",
+        r"ultrasonograph\w*|sonograph\w*|\busg\b",
+        r"echocardiograph\w*|\becho\b",
         r"radiology report",
         r"\binvoice\b",
         r"\bestimate\b",
@@ -351,13 +487,18 @@ _TYPE_SIGNALS: dict[str, tuple[str, ...]] = {
 
 def _title_lines(lines: list[str]) -> str:
     """The document's own headings near the top ("Radiology Report", "COMPLETE BLOOD
-    COUNT") - what the document says it is, which outweighs words in its body."""
-    return "\n".join(
+    COUNT", "Abdominal Ultrasonography") - what the document says it is, which
+    outweighs words in its body."""
+    titles = [
         line
         for line in lines[:15]
         if not _is_boilerplate(line)
         and ((_TITLE_RE.search(line) and len(line.split()) <= 6) or is_panel_title(line))
-    )
+    ]
+    heading = _printed_heading(lines)
+    if heading and heading not in titles:
+        titles.append(heading)
+    return "\n".join(titles)
 
 
 def _classify(
@@ -527,6 +668,14 @@ _REPORT_LEADIN_RE = re.compile(
 _DIRECTIVE_RE = re.compile(
     r"\b(review|follow[- ]?up|re-?check|revisit|return|come back|repeat|continue|call|contact|"
     r"avoid|keep|apply|give|administer|monitor|restrict|schedule|book|removal|remove|next visit)\b",
+    re.IGNORECASE,
+)
+# A procedure reported as done in the notes ("Antiseptic dressing done today.").
+_PROCEDURE_DONE_RE = re.compile(
+    r"\b(?:dressing|bandag\w*|sutur\w*|scaling|ear cleaning|wound cleaning|flushing|lancing|"
+    r"debridement|drain\w*|catheteri[sz]\w*|enema|nebuli[sz]\w*|fluid therapy|"
+    r"radiograph\w*|x-?ray|ultrasound|ultrasonograph\w*)\b.*\b(?:done|performed|carried out|"
+    r"applied|given|placed|removed)\b",
     re.IGNORECASE,
 )
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=\.)\s+(?=[A-Z])")
@@ -721,7 +870,7 @@ def build_record_card(
     return {
         "document_type": document_type,
         "visit_date": _find_date(text),
-        "document_title": _find_title(lines, table_sections),
+        "document_title": _find_title(lines, table_sections, document_type, diagnosis or None, medications),
         "clinic_provider": _find_provider(lines),
         "tags": _tags(body_text, parameters, document_type),
         "primary_diagnosis": diagnosis or None,
@@ -732,7 +881,8 @@ def build_record_card(
         "clinical_notes": "\n".join(clinical_notes) or None,
         "clinical_directives": directives,
         "vaccinations": vaccinations,
-        "procedures": sections.get("procedures", []),
+        # Also left in the notes, which the form shows; it has no procedures field yet.
+        "procedures": sections.get("procedures", []) + [n for n in notes if _PROCEDURE_DONE_RE.search(n)],
         "extraction": extraction or {"source": "text", "strategy": "flattened_text"},
         # Previous card shape, kept until the app reads the fields above.
         "type": document_type if document_type in ("lab_report", "vet_visit") else "unknown",

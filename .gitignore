@@ -7,3 +7,6 @@ venv/
 .pytest_cache/
 .ruff_cache/
 .DS_Store
+
+# Real reports (real pet and owner details) for scripts/eval_extraction.py.
+eval/private/

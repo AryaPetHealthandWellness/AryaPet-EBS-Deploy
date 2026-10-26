@@ -1,0 +1,191 @@
+{
+ "REAL LFT+KFT (ruled table, KFT values below names)": {
+  "clinic_provider": true,
+  "document_title": true,
+  "document_type": true,
+  "param A/G Ratio.abnormal": true,
+  "param A/G Ratio.reference_range": true,
+  "param A/G Ratio.unit": true,
+  "param A/G Ratio.value": true,
+  "param ALP.abnormal": true,
+  "param ALP.reference_range": true,
+  "param ALP.unit": true,
+  "param ALP.value": true,
+  "param ALT.abnormal": true,
+  "param ALT.reference_range": true,
+  "param ALT.unit": true,
+  "param ALT.value": true,
+  "param AST.abnormal": true,
+  "param AST.reference_range": true,
+  "param AST.unit": true,
+  "param AST.value": true,
+  "param Albumin.abnormal": true,
+  "param Albumin.reference_range": true,
+  "param Albumin.unit": true,
+  "param Albumin.value": true,
+  "param BUN.abnormal": true,
+  "param BUN.reference_range": true,
+  "param BUN.unit": true,
+  "param BUN.value": true,
+  "param BUN/Creatinine ratio.abnormal": true,
+  "param BUN/Creatinine ratio.reference_range": true,
+  "param BUN/Creatinine ratio.unit": true,
+  "param BUN/Creatinine ratio.value": true,
+  "param Blood Urea.abnormal": true,
+  "param Blood Urea.reference_range": true,
+  "param Blood Urea.unit": true,
+  "param Blood Urea.value": true,
+  "param Creatinine.abnormal": true,
+  "param Creatinine.reference_range": true,
+  "param Creatinine.unit": true,
+  "param Creatinine.value": true,
+  "param Direct bilirubin.abnormal": true,
+  "param Direct bilirubin.reference_range": true,
+  "param Direct bilirubin.unit": true,
+  "param Direct bilirubin.value": true,
+  "param Globulin.abnormal": true,
+  "param Globulin.reference_range": true,
+  "param Globulin.unit": true,
+  "param Globulin.value": true,
+  "param Indirect bilirubin.abnormal": true,
+  "param Indirect bilirubin.reference_range": true,
+  "param Indirect bilirubin.unit": true,
+  "param Indirect bilirubin.value": true,
+  "param Total Bilirubin.abnormal": true,
+  "param Total Bilirubin.reference_range": true,
+  "param Total Bilirubin.unit": true,
+  "param Total Bilirubin.value": true,
+  "param Total Protein.abnormal": true,
+  "param Total Protein.reference_range": true,
+  "param Total Protein.unit": true,
+  "param Total Protein.value": true,
+  "param Uric acid.abnormal": true,
+  "param Uric acid.reference_range": true,
+  "param Uric acid.unit": true,
+  "param Uric acid.value": true,
+  "primary_diagnosis": true,
+  "visit_date": true
+ },
+ "REAL biopsy (histopathology)": {
+  "clinic_provider": true,
+  "document_title": true,
+  "document_type": true,
+  "primary_diagnosis": true,
+  "symptoms": true,
+  "visit_date": true
+ },
+ "REAL consult 2022 (Practo clinical notes)": {
+  "clinic_provider": true,
+  "clinical_directives": true,
+  "document_title": true,
+  "document_type": true,
+  "param Body Weight.unit": true,
+  "param Body Weight.value": true,
+  "param Rectal Temp.unit": true,
+  "param Rectal Temp.value": true,
+  "primary_diagnosis": true,
+  "procedures": true,
+  "symptoms": true,
+  "visit_date": true
+ },
+ "abdominal ultrasound": {
+  "clinic_provider": true,
+  "document_title": true,
+  "document_type": true,
+  "visit_date": true
+ },
+ "caps letterhead consult": {
+  "clinic_provider": true,
+  "document_title": true
+ },
+ "cbc panel": {
+  "clinic_provider": true,
+  "document_title": true,
+  "document_type": true,
+  "param Haemoglobin.abnormal": true,
+  "param Haemoglobin.reference_range": true,
+  "param Haemoglobin.unit": true,
+  "param Haemoglobin.value": true,
+  "param WBC.abnormal": true,
+  "param WBC.reference_range": true,
+  "param WBC.unit": true,
+  "param WBC.value": true
+ },
+ "consult no heading": {
+  "clinic_provider": true,
+  "document_title": true,
+  "document_type": true,
+  "primary_diagnosis": true,
+  "visit_date": true
+ },
+ "consult with heading": {
+  "document_title": true,
+  "document_type": true,
+  "primary_diagnosis": true
+ },
+ "dental chart": {
+  "document_title": true
+ },
+ "discharge summary": {
+  "clinic_provider": true,
+  "document_title": true,
+  "document_type": true,
+  "primary_diagnosis": true
+ },
+ "echocardiography": {
+  "document_title": true,
+  "document_type": true,
+  "primary_diagnosis": true
+ },
+ "lab letterhead then panel": {
+  "document_title": true,
+  "document_type": true
+ },
+ "prescription only": {
+  "document_title": true,
+  "document_type": true
+ },
+ "serum biochemistry": {
+  "document_title": true,
+  "document_type": true,
+  "param ALT.abnormal": true,
+  "param ALT.reference_range": true,
+  "param ALT.unit": true,
+  "param ALT.value": true,
+  "param Creatinine.abnormal": true,
+  "param Creatinine.reference_range": true,
+  "param Creatinine.unit": true,
+  "param Creatinine.value": true
+ },
+ "snap test": {
+  "document_title": true,
+  "document_type": true
+ },
+ "stool examination": {
+  "document_title": true,
+  "document_type": true
+ },
+ "thorax radiograph": {
+  "document_title": true,
+  "document_type": true
+ },
+ "thyroid profile": {
+  "document_title": true,
+  "document_type": true,
+  "param T4.abnormal": true,
+  "param T4.reference_range": true,
+  "param T4.unit": true,
+  "param T4.value": true
+ },
+ "two function panels": {
+  "document_title": true
+ },
+ "urine routine": {
+  "document_title": true,
+  "document_type": true
+ },
+ "vaccination certificate": {
+  "document_title": true,
+  "document_type": true
+ }
+}

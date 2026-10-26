@@ -87,7 +87,8 @@ def test_visit_note_header_fields():
     assert card["document_type"] == "vet_visit"
     # Previously the first spaCy DATE entity won, which was the pet's age ("2 Years").
     assert card["visit_date"] == "2022-12-16"
-    assert card["document_title"] == "Clinical Notes"
+    # The printed heading is generic, so the diagnosis's gist says which visit it was.
+    assert card["document_title"] == "Clinical Notes - Hematoma"
     assert card["clinic_provider"] == "Cornerstone Pet Clinic"
 
 
@@ -138,7 +139,7 @@ def test_lab_report_fields_and_every_table_row():
 
     assert card["document_type"] == "lab_report"
     assert card["visit_date"] == "2025-09-21"
-    assert card["document_title"] == "Liver Function Test; Kidney Function Test"
+    assert card["document_title"] == "Liver & Kidney Function Tests"
     assert card["tags"] == ["Bloodwork"]
     rows = [
         (p["section"], p["name"], p["value"], p["unit"], p["reference_range"]) for p in card["parameters"]
@@ -353,7 +354,7 @@ def test_header_fields_end_the_section_before_them():
     assert card["primary_diagnosis"] == "Annual wellness exam - healthy"
     assert card["clinic_provider"] == "Happy Paws Veterinary Centre"
     assert card["visit_date"] == "2026-06-15"
-    assert card["document_title"] == "Veterinary Clinic Report"
+    assert card["document_title"] == "Veterinary Clinic Report - Annual wellness exam"
 
 
 def test_visit_with_medicines_is_a_visit_and_next_visit_is_a_directive():

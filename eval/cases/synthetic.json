@@ -1,0 +1,231 @@
+[
+ {
+  "name": "cbc panel",
+  "source": {
+   "text": "Happy Paws Diagnostics\nCOMPLETE BLOOD COUNT\nPatient: Simba\nHaemoglobin 12.1 g/dl 12-18\nWBC 18.2 6-17"
+  },
+  "expect": {
+   "document_title": "Complete Blood Count",
+   "document_type": "lab_report",
+   "clinic_provider": "Happy Paws Diagnostics",
+   "parameters": [
+    {
+     "name": "Haemoglobin",
+     "value": "12.1",
+     "unit": "g/dl",
+     "reference_range": "12-18",
+     "abnormal": false
+    },
+    {
+     "name": "WBC",
+     "value": "18.2",
+     "unit": null,
+     "reference_range": "6-17",
+     "abnormal": true
+    }
+   ]
+  }
+ },
+ {
+  "name": "abdominal ultrasound",
+  "source": {
+   "text": "City Vet Hospital\nABDOMINAL ULTRASONOGRAPHY\nPatient: Simba Date: 12/03/2026\nFindings: liver normal echotexture"
+  },
+  "expect": {
+   "document_title": "Abdominal Ultrasonography",
+   "document_type": "other",
+   "visit_date": "2026-03-12",
+   "clinic_provider": "City Vet Hospital"
+  }
+ },
+ {
+  "name": "thyroid profile",
+  "source": {
+   "text": "Pet Labs\nThyroid Profile\nT4 2.1 ug/dl 1.0-4.0"
+  },
+  "expect": {
+   "document_title": "Thyroid Profile",
+   "document_type": "lab_report",
+   "parameters": [
+    {
+     "name": "T4",
+     "value": "2.1",
+     "unit": "ug/dl",
+     "reference_range": "1.0-4.0",
+     "abnormal": false
+    }
+   ]
+  }
+ },
+ {
+  "name": "urine routine",
+  "source": {
+   "text": "Urine Routine Examination\nColour Pale yellow\npH 6.5"
+  },
+  "expect": {
+   "document_title": "Urine Routine Examination",
+   "document_type": "lab_report"
+  }
+ },
+ {
+  "name": "discharge summary",
+  "source": {
+   "text": "Blue Cross Hospital\nDischarge Summary\nDiagnosis: Parvoviral enteritis"
+  },
+  "expect": {
+   "document_title": "Discharge Summary",
+   "document_type": "vet_visit",
+   "primary_diagnosis": "Parvoviral enteritis",
+   "clinic_provider": "Blue Cross Hospital"
+  }
+ },
+ {
+  "name": "dental chart",
+  "source": {
+   "text": "Smile Vet Dental\nDental Chart\nProcedure performed: scaling and polishing"
+  },
+  "expect": {
+   "document_title": "Dental Chart"
+  }
+ },
+ {
+  "name": "echocardiography",
+  "source": {
+   "text": "Heart Vet Centre\nECHOCARDIOGRAPHY REPORT\nImpression: mild MVD"
+  },
+  "expect": {
+   "document_title": "Echocardiography Report",
+   "document_type": "other",
+   "primary_diagnosis": "mild MVD"
+  }
+ },
+ {
+  "name": "stool examination",
+  "source": {
+   "text": "Stool Examination\nOva of Ancylostoma seen"
+  },
+  "expect": {
+   "document_title": "Stool Examination",
+   "document_type": "lab_report"
+  }
+ },
+ {
+  "name": "snap test",
+  "source": {
+   "text": "SNAP 4Dx Plus Test\nEhrlichia: Positive\nAnaplasma: Negative"
+  },
+  "expect": {
+   "document_title": "SNAP 4Dx Plus Test",
+   "document_type": "lab_report"
+  }
+ },
+ {
+  "name": "consult with heading",
+  "source": {
+   "text": "Cornerstone Pet Clinic\nClinical Notes\nComplaint: vomiting x2 days\nDiagnosis: Acute gastritis\nRx: Pantoprazole 1mg/kg OD"
+  },
+  "expect": {
+   "document_title": "Clinical Notes - Acute gastritis",
+   "document_type": "vet_visit",
+   "primary_diagnosis": "Acute gastritis"
+  }
+ },
+ {
+  "name": "prescription only",
+  "source": {
+   "text": "Dr Rao Pet Clinic\nRx\nAmoxyclav 250mg BID x 5 days"
+  },
+  "expect": {
+   "document_title": "Prescription - Amoxyclav",
+   "document_type": "prescription"
+  }
+ },
+ {
+  "name": "vaccination certificate",
+  "source": {
+   "text": "VACCINATION CERTIFICATE\nNobivac DHPPi given 12/01/2026 Batch no A123"
+  },
+  "expect": {
+   "document_title": "Vaccination Certificate",
+   "document_type": "vaccination"
+  }
+ },
+ {
+  "name": "consult no heading",
+  "source": {
+   "text": "Paws & Claws Veterinary Hospital\nDate: 02/04/2026\nPatient: Bruno\nComplaint: limping right hind\nAssessment: CCL injury suspected"
+  },
+  "expect": {
+   "document_title": "Consultation - CCL injury suspected",
+   "document_type": "vet_visit",
+   "clinic_provider": "Paws & Claws Veterinary Hospital",
+   "visit_date": "2026-04-02",
+   "primary_diagnosis": "CCL injury suspected"
+  }
+ },
+ {
+  "name": "caps letterhead consult",
+  "source": {
+   "text": "CORNERSTONE PET CLINIC\nDate: 02/04/2026\nComplaint: limping\nAssessment: CCL injury"
+  },
+  "expect": {
+   "document_title": "Consultation - CCL injury",
+   "clinic_provider": "CORNERSTONE PET CLINIC"
+  }
+ },
+ {
+  "name": "thorax radiograph",
+  "source": {
+   "text": "Radiograph - Thorax (2 views)\nImpression: no abnormality"
+  },
+  "expect": {
+   "document_title": "Radiograph - Thorax (2 views)",
+   "document_type": "other"
+  }
+ },
+ {
+  "name": "serum biochemistry",
+  "source": {
+   "text": "SERUM BIOCHEMISTRY\nALT 133 10-109\nCreatinine 1.2 0.5-1.8"
+  },
+  "expect": {
+   "document_title": "Serum Biochemistry",
+   "document_type": "lab_report",
+   "parameters": [
+    {
+     "name": "ALT",
+     "value": "133",
+     "unit": null,
+     "reference_range": "10-109",
+     "abnormal": true
+    },
+    {
+     "name": "Creatinine",
+     "value": "1.2",
+     "unit": null,
+     "reference_range": "0.5-1.8",
+     "abnormal": false
+    }
+   ]
+  }
+ },
+ {
+  "name": "lab letterhead then panel",
+  "source": {
+   "text": "Sri Sai Veterinary Laboratory Report\nCBC\nHb 12 g/dl 12-18"
+  },
+  "expect": {
+   "document_title": "CBC",
+   "document_type": "lab_report"
+  }
+ },
+ {
+  "name": "two function panels",
+  "source": {
+   "text": "LIVER FUNCTION TEST\nALT 133 10-109 U/L\nKIDNEY FUNCTION TEST\nCreatinine 1.2 0.5-1.8 mg/dl"
+  },
+  "expect": {
+   "document_title": "Liver & Kidney Function Tests"
+  }
+ }
+]
