@@ -1,188 +1,235 @@
-"""Extracts lab panels from the original PDF's geometry rather than from OCR text.
+"""Extracts result tables from the original PDF's geometry rather than from OCR text.
 
 A lab table's row structure is carried by *column position*, which is lost the moment
 the document is flattened to a string - once "Albumin 2.5 2.2-4.0 g/dl ALP 1071.4" is
 one line, nothing in the token stream says 2.5 belongs to Albumin and not to ALP. The
-text-based parser in document_classifier.py can only guess that back with regex.
+text-based parser can only guess that back with regex.
 
 The PDF itself still has it, so this reads the PDF directly (the backend already holds
 the uploaded file in S3) and works down two strategies:
 
-  Tier 1 (_tables_from_ruled_lines) - the table is drawn with cell rectangles, so
-    pdfplumber can return true rows. Exact, no guessing.
-  Tier 2 (_tables_from_word_positions) - no grid is drawn, so rows are rebuilt by
-    clustering words on their y-coordinate and splitting columns on horizontal gaps.
+  Tier 1 (ruled lines) - the table is drawn with cell rectangles, so pdfplumber can
+    return true rows. Exact, no guessing.
+  Tier 2 (word positions) - no usable grid, so lines are rebuilt from each word's
+    position and split into cells on wide horizontal gaps.
 
-Columns are then located by reading the header row ("parameter" / "value" /
-"normal range") rather than by fixed index, so a lab that reorders or renames its
-columns still parses.
+Either way, a table is found by its header row ("Test  Result  Unit  Reference") -
+wherever on the page that sits - and each later cell is matched to a header column by
+its horizontal position, so a lab that reorders, renames or adds columns (a separate
+Unit or Flag column) still parses, and a page can hold several tables, each under its
+own title. Rows outside any header are read as text lines (app/services/result_rows.py)
+and kept only when they carry their own evidence of being a result.
 
-Callers fall back to the text-based parser when this returns None - that remains the
-only option for photographed documents, which have no PDF geometry at all.
+Callers fall back to the text-based parser when this returns no sections - that remains
+the only option for photographed documents, which have no PDF geometry at all.
 """
 
 import io
 import logging
-import re
 from typing import Any
+
+from app.services.result_rows import (
+    has_evidence,
+    header_roles,
+    is_panel_title,
+    outcome_pair,
+    parse_result_line,
+    row_from_cells,
+    row_from_parts,
+    title_text,
+)
 
 logger = logging.getLogger(__name__)
 
-# Same section-title test as document_classifier: fully-capitalized line naming a
-# panel. Kept in sync deliberately - both paths should agree on what a section is.
-_SECTION_KEYWORDS_RE = re.compile(
-    r"TEST|FUNCTION|PANEL|PROFILE|ANALYSIS|COUNT|SCREEN|CULTURE", re.IGNORECASE
-)
-_RANGE_BOUNDS_RE = re.compile(r"([\d.]+)\s*[–\-—−]\s*([\d.]+)")
-_UNIT_RE = re.compile(r"\b(g/dl|mg/dl|u/l|iu/l|mmol/l|umol/l|ng/ml|pg/ml|%)\b", re.IGNORECASE)
-_NUMERIC_RE = re.compile(r"^[<>]?\s*\d+\.?\d*$")
-
-# Header cells that identify each column's role.
-_NAME_HEADERS = ("parameter", "test", "analyte", "investigation", "examination")
-_VALUE_HEADERS = ("value", "result", "observed", "reading")
-_RANGE_HEADERS = ("normal", "reference", "range", "interval", "bio. ref")
-
 # A row needs at least a name and a value to be worth keeping.
 _MIN_COLUMNS = 2
+# Header rows that stop matching for this many lines in a row have ended.
+_MAX_MISSES = 3
 
 
 def _is_section_title(line: str) -> bool:
-    line = line.strip()
-    return bool(
-        len(line) > 4
-        and line == line.upper()
-        and any(c.isalpha() for c in line)
-        and ":" not in line
-        and not line[0].isdigit()
-        and _SECTION_KEYWORDS_RE.search(line)
-    )
+    return is_panel_title(line)
 
 
-def _page_section_title(page_text: str) -> str | None:
-    for line in page_text.split("\n"):
-        if _is_section_title(line):
-            return line.strip().title()
-    return None
-
-
-def _column_index(header: list[str], candidates: tuple[str, ...]) -> int | None:
-    for i, cell in enumerate(header):
-        if any(c in cell for c in candidates):
-            return i
-    return None
-
-
-def _is_abnormal(value: str, normal_range: str) -> bool:
-    bounds = _RANGE_BOUNDS_RE.search(normal_range)
-    if bounds is None:
-        return False
-    try:
-        val = float(value.lstrip("<> ").strip())
-        low, high = float(bounds.group(1)), float(bounds.group(2))
-    except ValueError:
-        return False
-    return val < low or val > high
-
-
-def _build_parameter(name: str, value: str, normal_range: str) -> dict[str, Any]:
-    unit = _UNIT_RE.search(normal_range)
-    return {
-        "name": name,
-        "value": value,
-        "normal_range": normal_range,
-        "unit": unit.group(0).upper() if unit else "",
-        "abnormal": _is_abnormal(value, normal_range),
-    }
+def _clean(rows: list[list[Any]]) -> list[list[str]]:
+    return [[" ".join(str(cell or "").split()) for cell in row] for row in rows]
 
 
 def _rows_to_parameters(rows: list[list[str]]) -> list[dict[str, Any]]:
-    """Turns raw table rows into parameters, using the header row to decide which
-    column is the name, the value and the reference interval."""
+    """Turns raw table rows into parameters, using a header row to decide which column
+    is the name, the value, the reference interval and so on."""
+    rows = _clean(rows)
     if len(rows) < 2:
         return []
 
-    header = [(cell or "").strip().lower() for cell in rows[0]]
-    i_name = _column_index(header, _NAME_HEADERS)
-    i_value = _column_index(header, _VALUE_HEADERS)
-    i_range = _column_index(header, _RANGE_HEADERS)
-
-    if i_name is None or i_value is None:
+    header_at = next((i for i, row in enumerate(rows) if header_roles(row)), None)
+    if header_at is None:
         # No recognizable header - fall back to the conventional ordering, but only
         # when the shape is right, so arbitrary non-table rows aren't misread.
-        if len(header) < _MIN_COLUMNS:
+        if len(rows[0]) < _MIN_COLUMNS:
             return []
-        i_name, i_value = 0, 1
-        i_range = 2 if len(header) > 2 else None
+        roles = {"name": 0, "value": 1}
+        if len(rows[0]) > 2:
+            roles["range"] = 2
         data_rows = rows
     else:
-        data_rows = rows[1:]
+        roles = header_roles(rows[header_at]) or {}
+        data_rows = rows[header_at + 1 :]
 
-    parameters: list[dict[str, Any]] = []
+    parameters = []
     for row in data_rows:
-        if max(i_name, i_value) >= len(row):
-            continue
-        name = (row[i_name] or "").strip()
-        value = (row[i_value] or "").strip()
-        normal_range = ""
-        if i_range is not None and i_range < len(row):
-            normal_range = (row[i_range] or "").strip()
-
-        # A real result row has a label and a numeric reading.
-        if not name or not value or not _NUMERIC_RE.match(value):
-            continue
-        if not any(c.isalpha() for c in name):
-            continue
-        parameters.append(_build_parameter(name, value, normal_range))
-
+        parameter = row_from_cells(row, roles)
+        if parameter is not None:
+            parameters.append(parameter)
     return parameters
 
 
-def _tables_from_ruled_lines(page: Any) -> list[list[list[str]]]:
-    return page.extract_tables(
-        {"vertical_strategy": "lines", "horizontal_strategy": "lines"}
-    )
+# ── Tier 1: ruled tables ───────────────────────────────────────────────────
 
 
-def _tables_from_word_positions(
-    page: Any, y_tolerance: float = 3.0, column_gap: float = 12.0
-) -> list[list[list[str]]]:
-    """Rebuilds rows for tables that aren't drawn with any grid: group words whose
-    vertical position matches, then break each group into cells wherever there's a
-    wide horizontal gap between consecutive words."""
-    words = page.extract_words()
-    if not words:
-        return []
-
-    buckets: dict[int, list[dict[str, Any]]] = {}
-    for word in words:
-        key = round(word["top"] / y_tolerance)
-        buckets.setdefault(key, []).append(word)
-
-    rows: list[list[str]] = []
-    for key in sorted(buckets):
-        ordered = sorted(buckets[key], key=lambda w: w["x0"])
-        cells: list[list[dict[str, Any]]] = []
-        current = [ordered[0]]
-        for previous, word in zip(ordered, ordered[1:], strict=False):
-            if word["x0"] - previous["x1"] > column_gap:
-                cells.append(current)
-                current = [word]
-            else:
-                current.append(word)
-        cells.append(current)
-        rows.append([" ".join(w["text"] for w in cell) for cell in cells])
-
-    return [rows] if rows else []
+def _title_above(page: Any, top: float) -> str | None:
+    """The nearest table title printed above `top` on the page."""
+    if top <= 1:
+        return None
+    above = page.crop((0, 0, page.width, top)).extract_text() or ""
+    for line in reversed(above.split("\n")):
+        if is_panel_title(line):
+            return title_text(line)
+    return None
 
 
-def _sections_from_page(page: Any, tables: list[list[list[str]]]) -> list[dict[str, Any]]:
-    title = _page_section_title(page.extract_text() or "")
-    sections = []
-    for table in tables:
-        parameters = _rows_to_parameters(table)
-        if parameters:
-            sections.append({"title": title, "parameters": parameters})
+def _sections_from_cell_rows(rows: list[list[str]], title: str | None) -> list[dict[str, Any]]:
+    """Rows of one grid read top to bottom. A grid can hold several panels - a title row
+    ("KIDNEY FUNCTION TEST") and a fresh header row partway down start the next one."""
+    if not any(header_roles(row) for row in rows):
+        parameters = _rows_to_parameters(rows)
+        return [{"title": title, "parameters": parameters}] if parameters else []
+
+    sections: list[dict[str, Any]] = []
+    roles: dict[str, int] | None = None
+    for row in rows:
+        filled = [cell for cell in row if cell]
+        if len(filled) == 1 and is_panel_title(filled[0]):
+            title = title_text(filled[0])
+            continue
+        found = header_roles(row)
+        if found is not None:
+            roles = found
+            continue
+        if roles is None:
+            continue
+        parameter = row_from_cells(row, roles)
+        if parameter is None:
+            continue
+        if not sections or sections[-1]["title"] != title:
+            sections.append({"title": title, "parameters": []})
+        sections[-1]["parameters"].append(parameter)
     return sections
+
+
+def _sections_from_ruled_tables(page: Any) -> list[dict[str, Any]]:
+    sections = []
+    for table in page.find_tables({"vertical_strategy": "lines", "horizontal_strategy": "lines"}):
+        sections.extend(_sections_from_cell_rows(_clean(table.extract()), _title_above(page, table.bbox[1])))
+    return sections
+
+
+# ── Tier 2: word positions ─────────────────────────────────────────────────
+
+
+def _word_lines(page: Any, y_tolerance: float = 3.0) -> list[list[dict[str, Any]]]:
+    """Words grouped into printed lines by their vertical position."""
+    words = sorted(page.extract_words(), key=lambda w: (w["top"], w["x0"]))
+    lines: list[list[dict[str, Any]]] = []
+    for word in words:
+        if lines and abs(word["top"] - lines[-1][0]["top"]) <= y_tolerance:
+            lines[-1].append(word)
+        else:
+            lines.append([word])
+    return [sorted(line, key=lambda w: w["x0"]) for line in lines]
+
+
+def _cells(line: list[dict[str, Any]], column_gap: float = 12.0) -> list[dict[str, Any]]:
+    """A line split into cells wherever there's a wide horizontal gap between words."""
+    cells: list[dict[str, Any]] = []
+    for word in line:
+        if cells and word["x0"] - cells[-1]["x1"] <= column_gap:
+            cells[-1]["text"] += " " + word["text"]
+            cells[-1]["x1"] = word["x1"]
+        else:
+            cells.append({"text": word["text"], "x0": word["x0"], "x1": word["x1"]})
+    return cells
+
+
+def _assign_columns(cells: list[dict[str, Any]], columns: dict[str, dict[str, float]]) -> dict[str, str]:
+    """Each cell's text under the header column it sits closest to. Values are often
+    centred under their header while names are left-aligned, so both the centre and the
+    left edge are compared."""
+    assigned: dict[str, list[str]] = {}
+    for cell in cells:
+        centre = (cell["x0"] + cell["x1"]) / 2
+
+        def distance(role: str, cell: dict[str, Any] = cell, centre: float = centre) -> float:
+            column = columns[role]
+            return min(abs(centre - (column["x0"] + column["x1"]) / 2), abs(cell["x0"] - column["x0"]))
+
+        assigned.setdefault(min(columns, key=distance), []).append(cell["text"])
+    return {role: " ".join(texts) for role, texts in assigned.items()}
+
+
+def _sections_from_word_positions(page: Any) -> list[dict[str, Any]]:
+    sections: list[dict[str, Any]] = []
+    title: str | None = None
+    columns: dict[str, dict[str, float]] | None = None
+    misses = 0
+
+    def add(row: dict[str, Any]) -> None:
+        if not sections or sections[-1]["title"] != title:
+            sections.append({"title": title, "parameters": []})
+        sections[-1]["parameters"].append(row)
+
+    for line in _word_lines(page):
+        cells = _cells(line)
+        texts = [cell["text"] for cell in cells]
+        joined = " ".join(texts)
+
+        roles = header_roles(texts)
+        if roles is not None:
+            columns = {role: cells[index] for role, index in roles.items()}
+            misses = 0
+            continue
+
+        if columns is not None:
+            by_role = _assign_columns(cells, columns)
+            order = list(columns)
+            row = row_from_cells(
+                [by_role.get(role, "") for role in order], {role: i for i, role in enumerate(order)}
+            )
+            if row is not None:
+                add(row)
+                misses = 0
+                continue
+
+        outcome = outcome_pair(joined)
+        parts = parse_result_line(joined)
+        if outcome is not None:
+            add(outcome)
+            continue
+        if parts is not None and parts["value"] is not None and has_evidence(parts):
+            add(row_from_parts(parts))
+            continue
+
+        if is_panel_title(joined):
+            title, columns = title_text(joined), None
+            continue
+        misses += 1
+        if misses >= _MAX_MISSES:
+            columns = None
+
+    return [s for s in sections if s["parameters"]]
+
+
+# ── Entry points ───────────────────────────────────────────────────────────
 
 
 def extract_pdf_text(pdf_bytes: bytes) -> str:
@@ -207,13 +254,13 @@ def extract_lab_sections_from_pdf(pdf_bytes: bytes) -> tuple[list[dict[str, Any]
 
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for page in pdf.pages:
-            page_ruled = _sections_from_page(page, _tables_from_ruled_lines(page))
+            page_ruled = _sections_from_ruled_tables(page)
             if page_ruled:
                 ruled.extend(page_ruled)
                 continue
             # Only pay for the word-position pass on pages the grid strategy
             # couldn't read, so a normal ruled report doesn't do the work twice.
-            clustered.extend(_sections_from_page(page, _tables_from_word_positions(page)))
+            clustered.extend(_sections_from_word_positions(page))
 
     if ruled and clustered:
         return ruled + clustered, "ruled_lines+word_positions"

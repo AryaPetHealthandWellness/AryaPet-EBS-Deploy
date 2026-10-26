@@ -17,6 +17,11 @@ One output field per form field, in form order:
   clinical_notes       observations and remaining notes, or None
   clinical_directives  follow-up instructions
 
+followed by fields the form doesn't have yet:
+
+  vaccinations         vaccine / date_given / batch / next_due, as printed
+  procedures           procedures performed (surgery, dressing, imaging study ...)
+
 Everything is copied from the source text, not inferred: no normal ranges are supplied,
 no frequency is defaulted, and no diagnosis is derived from values. Missing fields stay
 None / []. This is deterministic rule-based extraction (no spaCy), so the same document
@@ -31,8 +36,8 @@ from datetime import date
 from typing import Any
 
 from app.services.analyte_gazetteer import annotate_parameters
-from app.services.document_classifier import extract_lab_sections
 from app.services.pdf_table_extractor import extract_lab_sections_from_pdf, extract_pdf_text
+from app.services.result_rows import is_header_line, is_panel_title, sections_from_lines
 
 DOCUMENT_TYPES = ("vet_visit", "lab_report", "surgery", "vaccination", "prescription", "other")
 UI_TAGS = (
@@ -75,11 +80,13 @@ def _is_boilerplate(line: str) -> bool:
 _SECTION_LABELS: dict[str, str] = {
     "complaint": r"(?:chief |presenting )?complaints?|reason for visit|presenting signs|c/o",
     "observations": r"observations?|clinical findings|findings|physical exam(?:ination)?|"
-    r"examination|vitals",
+    r"examination|vitals|study|views?|technique",
     "diagnosis": r"(?:provisional |tentative |final |differential )?diagnosis|assessment|impression",
     "notes": r"notes|plan|treatment(?: plan)?|advice|recommendations?|instructions",
     "medications": r"rx|prescription|medications?|medicines|drugs prescribed",
     "results_notes": r"remarks?|comments?|interpretation",
+    "procedures": r"procedures?(?: performed| done)?|surgery (?:performed|done)|surgical procedure|"
+    r"operation(?: performed)?",
 }
 _LABEL_RES = {
     key: re.compile(rf"^(?:{pattern})\b\s*(?P<sep>[:\-–]\s*)?(?P<rest>.*)$", re.IGNORECASE)
@@ -166,7 +173,7 @@ _DATE_LABELS = (
     r"visit date|date of visit|consultation date",
     r"date of (?:test )?result|result date|report(?:ed)? date|date of report",
     r"(?:sample|specimen) (?:received|collected|collection) date|collection date|"
-    r"date of collection",
+    r"date of collection|(?:sample|specimen) (?:received|collected)(?: on)?",
     r"\bdate\b",
     r"generated on",
 )
@@ -211,7 +218,7 @@ _TITLE_RE = re.compile(
     r"\b(clinical notes|consultation (?:notes|record|summary)|case sheet|discharge summary|"
     r"prescription|vaccination (?:certificate|record|card)|immuni[sz]ation record|"
     r"operative report|surgery report|surgical report|anaest?hesia record|"
-    r"radiology report|x-?ray report|ultrasound report|lab(?:oratory)? report|invoice)\b",
+    r"radiology report|x-?ray report|ultrasound report|lab(?:oratory)? report|test report|invoice)\b",
     re.IGNORECASE,
 )
 
@@ -251,6 +258,12 @@ _TYPE_SIGNALS: dict[str, tuple[str, ...]] = {
         r"sample (?:received|collected)",
         r"lab(?:oratory)? report",
         r"test result",
+        r"test report",
+        r"rapid test|snap test",
+        r"\bantigen\b|\bantibod(?:y|ies)\b|\belisa\b|\bpcr\b",
+        r"urinalysis|urine (?:routine|analysis|examination)",
+        r"blood count|ha?emogram",
+        r"thyroid (?:profile|panel)",
     ),
     "vet_visit": (r"clinical notes", r"consultation", r"case sheet"),
     "prescription": (r"^\s*rx\b", r"\bprescription\b"),
@@ -278,18 +291,40 @@ _TYPE_SIGNALS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _classify(body: str, sections: dict[str, list[str]], table_rows: int) -> str | None:
+def _title_lines(lines: list[str]) -> str:
+    """The document's own headings near the top ("Radiology Report", "COMPLETE BLOOD
+    COUNT") - what the document says it is, which outweighs words in its body."""
+    return "\n".join(
+        line
+        for line in lines[:15]
+        if not _is_boilerplate(line)
+        and ((_TITLE_RE.search(line) and len(line.split()) <= 6) or is_panel_title(line))
+    )
+
+
+def _classify(
+    body: str,
+    titles: str,
+    sections: dict[str, list[str]],
+    result_rows: int,
+    vaccinations: int,
+) -> str | None:
     scores = {doc_type: 0 for doc_type in DOCUMENT_TYPES}
     for doc_type, signals in _TYPE_SIGNALS.items():
         for signal in signals:
             if re.search(signal, body, re.IGNORECASE | re.MULTILINE):
                 scores[doc_type] += 1
+            if titles and re.search(signal, titles, re.IGNORECASE | re.MULTILINE):
+                scores[doc_type] += 2
     # A visit note is recognised by its clinical headings more than by any word.
     scores["vet_visit"] += sum(1 for key in ("complaint", "observations", "diagnosis") if key in sections)
     if "medications" in sections:
         scores["prescription"] += 1
-    if table_rows >= 2:
+    if "procedures" in sections:
+        scores["surgery"] += 1
+    if result_rows >= 2:
         scores["lab_report"] += 2
+    scores["vaccination"] += min(vaccinations, 2)
 
     best = max(scores.values())
     if best == 0:
@@ -312,7 +347,8 @@ _TAG_RES: dict[str, re.Pattern[str]] = {
         "Bloodwork": r"\b(cbc|blood (?:test|work|panel|profile|count|smear)|ha?ematology|"
         r"biochemistry|serum|liver function|kidney function|renal function|lft|kft)\b",
         "Vaccines": r"\b(vaccin\w*|immuni[sz]\w*|booster)\b",
-        "Routine": r"\b(routine|annual (?:check|exam|visit)\w*|health check\w*|check-?ups?)\b",
+        # "Urine routine examination" is a test name, not a routine visit.
+        "Routine": r"(?<!urine )\b(routine|annual (?:check|exam|visit)\w*|health check\w*|check-?ups?)\b",
         "Preventive Care": r"\b(preventi\w+|de-?worm\w*|anthelmintic|heartworm prevent\w*|"
         r"flea (?:and|&) tick prevent\w*)\b",
         "Emergency": r"\b(emergency|urgent|critical care|casualty|triage)\b",
@@ -320,10 +356,17 @@ _TAG_RES: dict[str, re.Pattern[str]] = {
 }
 
 
+_NON_BLOOD_RE = re.compile(r"urine|urinalysis|stool|fa?ecal|faeces|feces", re.IGNORECASE)
+
+
 def _tags(body: str, parameters: list[dict[str, Any]], document_type: str | None) -> list[str]:
     tags = {tag for tag, regex in _TAG_RES.items() if regex.search(body)}
-    # A table of recognised blood analytes is bloodwork even if the report never says so.
-    if any(p.get("canonical_name") and p.get("section") for p in parameters):
+    # A table of recognised blood analytes is bloodwork even if the report never says so
+    # (urine and stool panels share analyte names like Glucose, so they don't count).
+    if any(
+        p.get("canonical_name") and p.get("section") and not _NON_BLOOD_RE.search(p["section"])
+        for p in parameters
+    ):
         tags.add("Bloodwork")
     if document_type == "vaccination":
         tags.add("Vaccines")
@@ -366,14 +409,21 @@ def _table_parameters(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
     parameters = []
     for section in sections:
         for row in section["parameters"]:
-            reference_range, unit = _split_unit(row.get("normal_range", ""))
+            if "reference_range" in row:
+                reference_range, unit = row["reference_range"], row.get("unit_text", "")
+            else:
+                reference_range, unit = _split_unit(row.get("normal_range", ""))
             parameter = {
                 "name": row["name"],
                 "value": row["value"],
                 "unit": unit,
                 "reference_range": reference_range,
                 "section": section.get("title"),
+                # Only claimed when the printed range or H/L flag settles it.
+                "abnormal": row.get("abnormal") if (reference_range or row.get("flag")) else None,
             }
+            if row.get("flag"):
+                parameter["flag"] = row["flag"]
             if row.get("canonical_name"):
                 parameter["canonical_name"] = row["canonical_name"]
             parameters.append(parameter)
@@ -395,6 +445,7 @@ def _pair_parameter(line: str) -> dict[str, Any] | None:
         "unit": m.group("unit"),
         "reference_range": "",
         "section": None,
+        "abnormal": None,
     }
 
 
@@ -414,7 +465,7 @@ _REPORT_LEADIN_RE = re.compile(
 )
 _DIRECTIVE_RE = re.compile(
     r"\b(review|follow[- ]?up|re-?check|revisit|return|come back|repeat|continue|call|contact|"
-    r"avoid|keep|apply|give|administer|monitor|restrict|schedule|book)\b",
+    r"avoid|keep|apply|give|administer|monitor|restrict|schedule|book|removal|remove)\b",
     re.IGNORECASE,
 )
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=\.)\s+(?=[A-Z])")
@@ -474,6 +525,72 @@ def _medication(line: str) -> dict[str, Any] | None:
     }
 
 
+# ── Vaccinations ──────────────────────────────────────────────────────────
+
+_VACCINE_NAME_RE = re.compile(
+    r"\b(anti-?rabies|rabies|dhpp\w*|da2pp\w*|dhlpp\w*|parvo\w*|distemper|leptospir\w*|lepto|"
+    r"bordetella|kennel cough|corona\w*|canine influenza|tricat\w*|fvrcp|felv|feline leuk\w*|"
+    r"panleuk\w*|calici\w*|rhinotrach\w*|nobivac|canigen|megavac|vanguard|defensor|eurican|"
+    r"recombitek|biocan|purevax|felocell|\d\s?-?in\s?-?1)\b",
+    re.IGNORECASE,
+)
+_VACCINE_LABEL_RE = re.compile(r"^\s*(?:vaccines?|vaccinations?|immuni[sz]ations?)\s*[:\-–]\s*", re.I)
+# Where a vaccine's name ends on a "Vaccine: X  Batch No: ..." line.
+_VACCINE_FIELD_RE = re.compile(
+    r"\s{2,}|\b(?:batch|lot|next due|due date|due on|due|next dose|date|given on|given|"
+    r"administered|expiry|exp|mfg|manufacturer)\b",
+    re.IGNORECASE,
+)
+_BATCH_RE = re.compile(r"\b(?:batch|lot)\s*(?:no\.?|number|#)?\s*[:\-]?\s*(?P<b>[A-Za-z0-9][\w/-]*)", re.I)
+_NEXT_DUE_RE = re.compile(
+    r"\b(?:next due|due date|due on|next dose|next vaccination|booster due|due)\s*[:\-]?\s*", re.I
+)
+
+
+def _vaccination(sentence: str) -> dict[str, Any] | None:
+    labelled = _VACCINE_LABEL_RE.match(sentence)
+    if labelled is None and not _VACCINE_NAME_RE.search(sentence):
+        return None
+    rest = sentence[labelled.end() :] if labelled else sentence
+
+    next_due = None
+    due = _NEXT_DUE_RE.search(rest)
+    if due:
+        next_due = _parse_date(rest[due.end() : due.end() + 25])
+    batch = _BATCH_RE.search(rest)
+    given_text = rest[: due.start()] if due else rest
+    date_given = _parse_date(given_text)
+
+    # The name is everything before the first other field or date on the line.
+    cut = len(rest)
+    for regex in (_VACCINE_FIELD_RE, *_DATE_RES):
+        m = regex.search(rest)
+        if m and m.start() > 0:
+            cut = min(cut, m.start())
+    name = re.sub(r"\bvaccin\w*\b", "", rest[:cut], flags=re.I).strip(" .,:-–")
+    has_details = date_given or next_due or batch or "vaccin" in sentence.lower()
+    if not name or (labelled is None and not has_details):
+        return None
+    return {
+        "vaccine": name,
+        "date_given": date_given,
+        "batch": batch.group("b") if batch else None,
+        "next_due": next_due,
+    }
+
+
+def _vaccinations(lines: list[str]) -> list[dict[str, Any]]:
+    found = []
+    for line in lines:
+        if _TITLE_RE.fullmatch(line.strip()):
+            continue
+        for sentence in _SENTENCE_SPLIT_RE.split(line):
+            vaccination = _vaccination(sentence.strip())
+            if vaccination is not None:
+                found.append(vaccination)
+    return found
+
+
 # ── Assembly ───────────────────────────────────────────────────────────────
 
 
@@ -483,9 +600,7 @@ def _body_lines(lines: list[str]) -> list[str]:
     otherwise tag every record from that clinic."""
     start = 0
     for i, line in enumerate(lines):
-        if _section_label(line) or _TITLE_RE.search(line) or (
-            "value" in line.lower() and ("range" in line.lower() or "normal" in line.lower())
-        ):
+        if _section_label(line) or _TITLE_RE.search(line) or is_panel_title(line) or is_header_line(line):
             start = i
             break
     return [line for line in lines[start:] if not _is_boilerplate(line)]
@@ -500,7 +615,7 @@ def build_record_card(
     geometry; without them, tables are parsed from `text`."""
     lines = _lines(text)
     if not table_sections:
-        table_sections = [s for s in extract_lab_sections(text) if s["parameters"]]
+        table_sections = sections_from_lines(lines)
     for section in table_sections:
         annotate_parameters(section["parameters"])
 
@@ -531,7 +646,14 @@ def build_record_card(
     diagnosis = " ".join(sections.get("diagnosis", [])).strip()
     results_notes = " ".join(sections.get("results_notes", [])).strip()
 
-    document_type = _classify(body_text, sections, sum(len(s["parameters"]) for s in table_sections))
+    vaccinations = _vaccinations(body)
+    document_type = _classify(
+        body_text,
+        _title_lines(lines),
+        sections,
+        sum(len(s["parameters"]) for s in table_sections),
+        len(vaccinations),
+    )
 
     return {
         "document_type": document_type,
@@ -546,6 +668,8 @@ def build_record_card(
         "medications": medications,
         "clinical_notes": "\n".join(clinical_notes) or None,
         "clinical_directives": directives,
+        "vaccinations": vaccinations,
+        "procedures": sections.get("procedures", []),
         "extraction": extraction or {"source": "text", "strategy": "flattened_text"},
         # Previous card shape, kept until the app reads the fields above.
         "type": document_type if document_type in ("lab_report", "vet_visit") else "unknown",

@@ -180,3 +180,108 @@ def test_tags_only_use_the_apps_chips():
 
     assert set(card["tags"]) <= set(UI_TAGS)
     assert card["tags"] == ["Dental", "Vaccines", "Routine"]
+
+
+# ── Reports other than liver/kidney panels (synthetic text, no real patients) ──
+
+_CBC_TEXT = """\
+Paws Diagnostics Lab
+Pet Name: Bruno  Species: Canine  Breed: Labrador
+Sample Collected: 03/02/2025
+COMPLETE BLOOD COUNT
+Test Result Unit Reference Range
+Haemoglobin 9.8 g/dL 12.0 - 18.0
+Total WBC Count 18500 /cumm 6000 - 17000
+Lymphocytes 12 % 12 - 30
+Remarks: Leucocytosis with neutrophilia. Mild anaemia.
+"""
+
+
+def test_cbc_from_photo_text_reads_every_row_with_its_unit_and_flag():
+    card = build_record_card(_CBC_TEXT)
+
+    assert card["document_type"] == "lab_report"
+    assert card["visit_date"] == "2025-02-03"
+    assert card["document_title"] == "Complete Blood Count"
+    assert card["tags"] == ["Bloodwork"]
+    assert card["results_notes"] == "Leucocytosis with neutrophilia. Mild anaemia."
+    rows = [
+        (p["name"], p["value"], p["unit"], p["reference_range"], p["abnormal"]) for p in card["parameters"]
+    ]
+    assert rows == [
+        ("Haemoglobin", "9.8", "g/dL", "12.0 - 18.0", True),
+        ("Total WBC Count", "18500", "/cumm", "6000 - 17000", True),
+        ("Lymphocytes", "12", "%", "12 - 30", False),
+    ]
+
+
+def test_qualitative_urinalysis_is_not_tagged_bloodwork_or_routine():
+    card = build_record_card(
+        "URINE ROUTINE EXAMINATION\nParameter Result Reference\n"
+        "Specific Gravity 1.012 1.015 - 1.045\nProtein Trace Negative\nGlucose Negative Negative\n"
+    )
+
+    assert card["document_type"] == "lab_report"
+    assert [(p["name"], p["value"], p["abnormal"]) for p in card["parameters"]] == [
+        ("Specific Gravity", "1.012", True),
+        ("Protein", "Trace", True),
+        ("Glucose", "Negative", False),
+    ]
+    assert card["tags"] == []
+
+
+def test_rapid_test_outcomes_become_parameters():
+    card = build_record_card(
+        "Rapid Test Report\nDate: 4 March 2025\nCanine Parvovirus Antigen Test: Positive\n"
+        "Canine Distemper Antigen: Negative\nRemarks: Consistent with parvoviral enteritis.\n"
+    )
+
+    assert card["document_type"] == "lab_report"
+    assert [(p["name"], p["value"]) for p in card["parameters"]] == [
+        ("Canine Parvovirus Antigen Test", "Positive"),
+        ("Canine Distemper Antigen", "Negative"),
+    ]
+
+
+def test_vaccination_record_lists_each_vaccine():
+    card = build_record_card(
+        "Vaccination Record\nDate: 15/06/2024\n"
+        "Vaccine: Feline Tricat Trio  Batch No: A1234  Next Due: 15/06/2025\n"
+        "Vaccine: Anti-Rabies (Nobivac Rabies)  Batch No: R998  Next Due: 15/06/2025\n"
+    )
+
+    assert card["document_type"] == "vaccination"
+    assert card["vaccinations"] == [
+        {"vaccine": "Feline Tricat Trio", "date_given": None, "batch": "A1234", "next_due": "2025-06-15"},
+        {
+            "vaccine": "Anti-Rabies (Nobivac Rabies)",
+            "date_given": None,
+            "batch": "R998",
+            "next_due": "2025-06-15",
+        },
+    ]
+
+
+def test_imaging_report_is_typed_by_its_own_title():
+    card = build_record_card(
+        "City Pet Imaging Centre\nRadiology Report\nDate: 22.08.2024\n"
+        "Study: Thoracic radiographs, lateral and VD views\n"
+        "Findings: Diffuse bronchial pattern noted.\nImpression: Chronic bronchitis.\n"
+    )
+
+    assert card["document_type"] == "other"
+    assert card["primary_diagnosis"] == "Chronic bronchitis."
+    assert "Diffuse bronchial pattern noted." in card["clinical_notes"]
+
+
+def test_discharge_summary_separates_procedure_from_diagnosis():
+    card = build_record_card(
+        "Sunshine Animal Hospital\nDischarge Summary\nDiagnosis: Pyometra\n"
+        "Procedure performed: Ovariohysterectomy under general anaesthesia\n"
+        "Instructions: Keep the e-collar on. Suture removal after 10 days.\n"
+    )
+
+    assert card["document_type"] == "surgery"
+    assert card["primary_diagnosis"] == "Pyometra"
+    assert card["procedures"] == ["Ovariohysterectomy under general anaesthesia"]
+    assert card["clinical_directives"] == ["Keep the e-collar on.", "Suture removal after 10 days."]

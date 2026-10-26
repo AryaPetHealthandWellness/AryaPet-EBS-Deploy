@@ -73,3 +73,37 @@ def test_is_section_title_rejects_prose_and_metadata():
     assert not _is_section_title("WBC test result was 7.2 within panel.")
     assert not _is_section_title("SAMPLE RECEIVED DATE: 21.09.2025")
     assert not _is_section_title("Parameter Value Normal range")
+
+
+# ── Real PDFs from tests/dummy_reports (synthetic data) ──
+
+from pathlib import Path  # noqa: E402
+
+from app.services.pdf_table_extractor import extract_lab_sections_from_pdf  # noqa: E402
+
+_DUMMY_REPORTS = Path(__file__).parent / "dummy_reports"
+
+
+def _sections(filename: str) -> list[dict]:
+    sections, _ = extract_lab_sections_from_pdf((_DUMMY_REPORTS / filename).read_bytes())
+    return sections
+
+
+def test_pdf_with_separate_unit_column_reads_every_panel_under_its_own_title():
+    sections = _sections("dummy_report_01_mochi_rottweiler.pdf")
+
+    assert [(s["title"], len(s["parameters"])) for s in sections] == [
+        ("Liver Function Test", 10),
+        ("Kidney Function Test", 5),
+    ]
+    albumin = sections[0]["parameters"][0]
+    assert (albumin["name"], albumin["value"], albumin["reference_range"], albumin["unit_text"]) == (
+        "Albumin", "3.2", "2.2 - 4.0", "g/dL",
+    )
+
+
+def test_feline_pdf_reads_feline_ranges():
+    sections = _sections("dummy_report_21_whiskers_scottish_fold.pdf")
+    alt = next(p for s in sections for p in s["parameters"] if p["name"] == "ALT")
+
+    assert alt["reference_range"] == "12 - 130"
