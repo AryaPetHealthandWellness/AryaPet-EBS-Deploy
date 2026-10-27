@@ -31,7 +31,9 @@ _NUMBER = r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?"
 _VALUE_RE = re.compile(
     rf"(?<![\w/.^])(?P<v>[<>≤≥]?\s?(?:{_NUMBER}))(?![\w^]|[./]\d)"
 )
-_DATE_RE = re.compile(r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b")
+# A date repeats its separator ("21.09.2025", "26/10/26"); a decimal range such as
+# "12.8-53.5" or "6.0-17.0" mixes them, and must not read as one.
+_DATE_RE = re.compile(r"\b\d{1,2}([./-])\d{1,2}\1\d{2,4}\b(?![.]\d)")
 _QUALITATIVE = (
     r"non[- ]?reactive|reactive|not detected|detected|not seen|seen|positive|negative|"
     r"absent|present|nil|trace|normal|abnormal|\+{1,4}|[1-4]\+"
@@ -243,7 +245,11 @@ def parse_result_line(line: str) -> dict[str, Any] | None:
         return None
 
     # "Creatinine 0.6 – 1.4 mg/dl": the first number opens the range - no value here.
-    range_at_start = _RANGE_RE.match(line, first.start())
+    # Checked from the number itself: the match can begin on the space before it, and
+    # photo text has two between columns ("ALT  14-111 U/L"), which made a range's
+    # lower bound read as the value.
+    number_at = first.start() + len(first.group(0)) - len(first.group(0).lstrip())
+    range_at_start = _RANGE_RE.match(line, number_at)
     if first is numeric and range_at_start and range_at_start.group("lo") is not None:
         value, rest = None, line[first.start() :]
     else:

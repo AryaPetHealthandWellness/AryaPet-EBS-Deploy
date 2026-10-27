@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -54,7 +55,105 @@ BASELINE = ROOT / "eval" / "baseline.json"
 # ── Running a case ──────────────────────────────────────────────────────────
 
 
-def run_source(source: dict[str, str]) -> tuple[dict[str, Any], str]:
+VISION_OCR = ROOT / "eval" / "tools" / "vision_ocr"
+
+
+def layout_text_from_blocks(blocks: list[dict], row_tolerance=0.012, column_gap=0.035) -> str:
+    """Port of the app's OnDeviceOcr.layoutTextFromBlocks (AryaPet-MVP
+    lib/features/scanner/on_device_ocr.dart) - keep the two identical, since this is
+    the text a photo actually reaches the backend as."""
+    frags = [b for b in blocks if (b.get("text") or "").strip()]
+    if frags and all("angle" in b for b in frags):
+        return _deskewed_layout(frags, column_gap)
+    rows: list[list[dict]] = []
+    for f in sorted(frags, key=lambda b: b["y"]):
+        if rows and abs(f["y"] - rows[-1][0]["y"]) <= row_tolerance:
+            rows[-1].append(f)
+        else:
+            rows.append([f])
+    lines = []
+    for row in rows:
+        row.sort(key=lambda b: b["x"])
+        out = row[0]["text"].strip()
+        for prev, cur in zip(row, row[1:], strict=False):
+            gap = cur["x"] - (prev["x"] + prev["width"])
+            out += ("  " if gap > column_gap else " ") + cur["text"].strip()
+        lines.append(out)
+    return "\n".join(lines)
+
+
+def _deskewed_layout(frags: list[dict], column_gap: float) -> str:
+    """Rows rebuilt after turning the page upright: a tilted photo's columns drift up
+    or down by more than a row's height across the page, which put each value on its
+    neighbour's line. Units: image heights, so x is scaled by the aspect ratio."""
+    import statistics
+
+    aspect = frags[0]["aspect"]
+    # Long fragments say the page's tilt reliably; a lone "2.5" box does not.
+    long = [f["angle"] for f in frags if f["length"] * aspect >= 0.05] or [f["angle"] for f in frags]
+    t = statistics.median(long)
+    cos, sin = math.cos(t), math.sin(t)
+    placed = []
+    for f in frags:
+        x, y = f["cx"] * aspect, f["cy"]
+        half = f["length"] * aspect / 2
+        ux = x * cos + y * sin
+        uy = -x * sin + y * cos
+        placed.append({"text": f["text"].strip(), "y": uy, "x0": ux - half, "x1": ux + half})
+    tolerance = 0.5 * statistics.median(f["lineHeight"] for f in frags)
+    rows: list[list[dict]] = []
+    for f in sorted(placed, key=lambda f: f["y"]):
+        if rows and abs(f["y"] - statistics.fmean(g["y"] for g in rows[-1])) <= tolerance:
+            rows[-1].append(f)
+        else:
+            rows.append([f])
+    lines = []
+    for row in rows:
+        row.sort(key=lambda f: f["x0"])
+        out = row[0]["text"]
+        for prev, cur in zip(row, row[1:], strict=False):
+            out += ("  " if cur["x0"] - prev["x1"] > column_gap * aspect else " ") + cur["text"]
+        lines.append(out)
+    return "\n".join(lines)
+
+
+def ocr_image(path: Path) -> str:
+    """The text the app would send for this photo (Apple Vision + the app's layout)."""
+    import subprocess
+
+    if not VISION_OCR.exists():
+        subprocess.run(
+            ["swiftc", "-O", str(VISION_OCR) + ".swift", "-o", str(VISION_OCR)], check=True
+        )
+    blocks = json.loads(subprocess.run([str(VISION_OCR), str(path)], capture_output=True, text=True).stdout)
+    return layout_text_from_blocks(blocks)
+
+
+class Skip(Exception):
+    pass
+
+
+def run_source(source: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    if "image" in source:
+        text = ocr_image(ROOT / source["image"])
+        if not text.strip():
+            # Vision needs the Neural Engine: it returns nothing in a macOS VM or the
+            # iOS simulator. Skipped rather than scored as a total failure.
+            raise Skip("Vision returned no text on this machine")
+        return build_record_from_text(text), text
+    if "tilt" in source:
+        # A PDF page's real word boxes as a tilted photo's OCR would report them -
+        # tests the app's row rebuild + the parser without Vision (eval/tools/tilt_sim.py).
+        sys.path.insert(0, str(ROOT / "eval" / "tools"))
+        import pdfplumber
+        from tilt_sim import fragments, tilted_blocks
+
+        with pdfplumber.open(ROOT / source["tilt"]) as doc:
+            page = doc.pages[source.get("page", 1) - 1]
+            frags = fragments(page)
+            blocks = tilted_blocks(frags, page.width, page.height, source["degrees"], with_angle=True)
+        text = layout_text_from_blocks(blocks)
+        return build_record_from_text(text), text
     if "pdf" in source:
         data = (ROOT / source["pdf"]).read_bytes()
         return build_record_from_pdf(data) or {}, extract_pdf_text(data)
@@ -214,13 +313,18 @@ def main() -> int:
     ap.add_argument("-k", help="only cases whose name contains this")
     ap.add_argument("--save", action="store_true", help="save as the new baseline")
     ap.add_argument("--quiet", action="store_true", help="summary only")
-    ap.add_argument("--lapses-only", nargs="*", metavar="PDF", help="lapse report for these PDFs")
+    ap.add_argument("--lapses-only", nargs="*", metavar="FILE", help="lapse report for these PDFs/images")
+    ap.add_argument("--show-text", action="store_true", help="print the text each case was read as")
     args = ap.parse_args()
 
     if args.lapses_only is not None:
         for path in args.lapses_only:
-            data = Path(path).read_bytes()
-            got, text = build_record_from_pdf(data) or {}, extract_pdf_text(data)
+            if Path(path).suffix.lower() == ".pdf":
+                data = Path(path).read_bytes()
+                got, text = build_record_from_pdf(data) or {}, extract_pdf_text(data)
+            else:
+                text = ocr_image(Path(path))
+                got = build_record_from_text(text)
             _print_lapses(Path(path).name, *lapses(text, got), got)
         return 0
 
@@ -228,7 +332,12 @@ def main() -> int:
     results: dict[str, dict[str, bool]] = {}
     totals = [0, 0]
     for case in load_cases(args.k):
-        got, text = run_source(case["source"])
+        try:
+            got, text = run_source(case["source"])
+        except Skip as why:
+            if not args.quiet:
+                print(f"\nSKIP  {case['name']}  ({why})")
+            continue
         checks = score(case.get("expect", {}), got)
         results[case["name"]] = {c: ok for c, ok, _ in checks}
         passed = sum(ok for _, ok, _ in checks)
@@ -238,6 +347,8 @@ def main() -> int:
             continue
         mark = "PASS" if passed == len(checks) else "FAIL"
         print(f"\n{mark}  {case['name']}  ({passed}/{len(checks)})")
+        if args.show_text:
+            print("   " + text.replace("\n", "\n   "))
         for check, ok, detail in checks:
             if not ok:
                 print(f"   ✗ {check:30} {detail}")

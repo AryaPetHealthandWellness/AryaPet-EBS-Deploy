@@ -10,3 +10,4 @@ venv/
 
 # Real reports (real pet and owner details) for scripts/eval_extraction.py.
 eval/private/
+eval/tools/vision_ocr
