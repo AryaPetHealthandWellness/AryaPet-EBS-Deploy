@@ -105,6 +105,23 @@ async def test_pdf_with_a_table_completes_without_any_client_text(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_csv_export_is_read_from_the_file_itself(monkeypatch):
+    # An analyzer's CSV holds the table as columns - no client text needed.
+    async def fake_fetch(*_):
+        return b"Assay,Result,Ref,Unit\nALB,2.4,3.2--4.3,g/dL\n"
+
+    monkeypatch.setattr(processing_consumer, "_fetch_pdf_bytes", fake_fetch)
+
+    document = _document("user/abc-UserReport_134000448_Abs.csv", raw_text=None)
+    session = _Session()
+
+    assert await _process_document(document, session, _SETTINGS) is True
+    assert document.status == DocumentStatus.COMPLETED
+    assert document.parsed_result["parameters"][0]["value"] == "2.4"
+    assert document.parsed_result["extraction"]["source"] == "csv"
+
+
+@pytest.mark.asyncio
 async def test_photo_without_text_waits_for_redelivery():
     # The S3 event usually beats the client's text submission for a photo. Recording
     # an empty result here would mark it done with nothing in it.

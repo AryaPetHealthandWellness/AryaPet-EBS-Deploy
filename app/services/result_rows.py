@@ -46,7 +46,7 @@ _TEST_OUTCOME_RE = re.compile(
 )
 
 _RANGE_RE = re.compile(
-    rf"(?P<lo>{_NUMBER})\s*(?:[-–—−]|to)\s*(?P<hi>{_NUMBER})"
+    rf"(?P<lo>{_NUMBER})\s*(?:[-–—−]{{1,2}}|to)\s*(?P<hi>{_NUMBER})"
     rf"|(?P<op>[<>≤≥]|up\s?to|less than|below|more than|above)\s*(?P<bound>{_NUMBER})",
     re.IGNORECASE,
 )
@@ -64,6 +64,7 @@ _UNIT_RE = re.compile(
     re.IGNORECASE,
 )
 _FLAG_RE = re.compile(r"\s+(?P<flag>H|L|HH|LL|High|Low|\*|↑|↓)\s*$")
+_FLAG_TOKEN_RE = re.compile(r"H|L|HH|LL|High|Low|↑|↓")
 _LONE_VALUE_RE = re.compile(rf"^(?:[<>]?\s?(?:{_NUMBER})|{_QUALITATIVE})$", re.IGNORECASE)
 
 # Names that are identifiers or patient details, never results.
@@ -86,10 +87,10 @@ _ROLE_HEADERS: dict[str, tuple[str, ...]] = {
     # Checked in this order so a cell is claimed by the most specific role.
     "unit": ("unit", "units", "uom"),
     "flag": ("flag", "status", "h/l"),
-    "range": ("normal", "reference", "range", "interval", "bio. ref", "expected", "limits"),
+    "range": ("normal", "reference", "range", "interval", "bio. ref", "ref", "expected", "limits"),
     "value": ("value", "result", "observed", "reading", "finding"),
     "name": ("parameter", "test", "analyte", "investigation", "examination", "description",
-             "component"),
+             "component", "assay"),
 }
 _HEADER_WORD_RE = {
     role: re.compile(r"\b(" + "|".join(re.escape(w) for w in words) + r")\b", re.IGNORECASE)
@@ -204,6 +205,8 @@ def is_abnormal(value: str, reference: str, flag: str | None = None) -> bool | N
 
 
 def _row(name: str, value: str, reference: str, unit: str, flag: str | None) -> dict[str, Any]:
+    # "3.2--4.3" -> "3.2-4.3": one dash is what every reader of the range expects.
+    reference = re.sub(r"(?<=\d)\s*--\s*(?=\d)", "-", reference)
     return {
         "name": name,
         "value": value,
@@ -238,6 +241,10 @@ def parse_result_line(line: str) -> dict[str, Any] | None:
     if not candidates:
         return None
     first = min(candidates, key=lambda c: c.start())
+    if re.search(r"\s--(?:\s|$)", line[: first.start()]):
+        # "eGFRcr  --  0": "--" is the printed "not calculated"; the number after it
+        # belongs to another column.
+        return None
     name = _clean_name(line[: first.start()])
     if not name or not any(c.isalpha() for c in name) or len(name) > 60 or len(name.split()) > 7:
         return None
@@ -282,6 +289,10 @@ def parse_result_line(line: str) -> dict[str, Any] | None:
     leftover = [w for w in rest.split() if any(c.isalpha() for c in w)]
     if len(leftover) > 1:
         return None
+    if flag is None and leftover and _FLAG_TOKEN_RE.fullmatch(leftover[0]):
+        # Analyzer exports print the flag in its own column mid-row:
+        # "ALB  2.4  1.50  1.49  L  3.2--4.3  g/dL".
+        flag = leftover[0]
     if value is None and not reference:
         return None
 

@@ -36,6 +36,7 @@ from datetime import date
 from typing import Any
 
 from app.services.analyte_gazetteer import annotate_parameters
+from app.services.csv_report import read_spreadsheet_report
 from app.services.pdf_table_extractor import extract_lab_sections_from_pdf, extract_pdf_text
 from app.services.result_rows import is_header_line, is_panel_title, sections_from_lines
 
@@ -209,7 +210,7 @@ _DATE_RES = (
 # Most to least specific. "Generated on" is last: it's when the PDF was printed.
 _DATE_LABELS = (
     r"visit date|date of visit|consultation date",
-    r"date of (?:test )?result|result date|report(?:ed)? date|date of report",
+    r"date of (?:test )?result|result date|report(?:ed)? date|date of report|test (?:time|date)",
     r"(?:sample|specimen) (?:received|collected|collection) date|collection date|"
     r"date of collection|(?:sample|specimen) (?:received|collected)(?: on)?",
     r"\bdate\b",
@@ -908,3 +909,12 @@ def build_record_from_pdf(pdf_bytes: bytes, fallback_text: str | None = None) ->
 
 def build_record_from_text(text: str) -> dict[str, Any]:
     return build_record_card(text)
+
+
+def build_record_from_spreadsheet(data: bytes) -> dict[str, Any] | None:
+    """A lab report exported as CSV/TSV (see csv_report). None when the file holds no
+    text at all."""
+    text, sections = read_spreadsheet_report(data)
+    if not text.strip():
+        return None
+    return build_record_card(text, sections, {"source": "csv", "strategy": "csv_columns"})

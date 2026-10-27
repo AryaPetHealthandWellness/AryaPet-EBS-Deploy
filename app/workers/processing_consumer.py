@@ -6,7 +6,10 @@ The queue is fed by the documents bucket itself: Terraform wires an
 arrives the moment a file lands in S3. The API has no permission to send to this
 queue and doesn't need one - uploads are the trigger.
 
-That timing suits the two kinds of document differently:
+That timing suits the kinds of document differently:
+
+  CSV/TSV exports (an analyzer's "UserReport_*.csv") are read straight from the
+  file's own columns (csv_report), needing nothing from the client.
 
   PDFs are processed straight away. Their tables are read from the file's own
   geometry and their wording from the file's own text layer (pdf_table_extractor),
@@ -38,7 +41,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.config import build_database_url, get_settings
 from app.db.models.document import Document, DocumentStatus
 from app.db.session import get_session_maker, init_engine
-from app.services.record_extractor import build_record_from_pdf, build_record_from_text
+from app.services.csv_report import is_spreadsheet_report
+from app.services.record_extractor import (
+    build_record_from_pdf,
+    build_record_from_spreadsheet,
+    build_record_from_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +93,17 @@ async def _build_card(document: Document, settings: Any) -> dict[str, Any] | Non
     PDF, whose OCR text the client hasn't submitted - so the caller can wait for it
     instead of recording an empty result."""
     s3_key = document.s3_key or ""
+    if is_spreadsheet_report(s3_key):
+        # A CSV/TSV export already holds the table as columns - read the file
+        # itself; the client's text adds nothing.
+        try:
+            data = await _fetch_pdf_bytes(s3_key, settings.documents_bucket, settings.aws_region)
+            card = await asyncio.to_thread(build_record_from_spreadsheet, data)
+            if card is not None:
+                return card
+        except Exception:
+            logger.exception("Spreadsheet extraction failed for document %s", document.id)
+
     if s3_key.lower().endswith(".pdf"):
         try:
             pdf_bytes = await _fetch_pdf_bytes(
