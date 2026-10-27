@@ -1,21 +1,32 @@
-"""Login/signup for the app. There is a single endpoint for both — Sign in with Apple
-is idempotent, so the first call for a given Apple account creates the user (signup)
-and every call after that is a login. See app/auth/cognito_admin.py for why Cognito
-Admin APIs are used instead of Cognito's own federated-IdP support.
+"""Login/signup for the app.
+
+Sign in with Apple has a single endpoint for both - it is idempotent, so the first call
+for a given Apple account creates the user (signup) and every call after that is a
+login. See app/auth/cognito_admin.py for why Cognito Admin APIs are used instead of
+Cognito's own federated-IdP support.
+
+Email + password accounts have /signup and /login; Cognito stores and checks the
+user's own password, and the Cognito username is their real email.
 """
 
 import asyncio
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.apple import AppleTokenValidationError, verify_apple_identity_token
 from app.auth.cognito_admin import (
+    AccountExistsError,
     CognitoAdminError,
+    InvalidCredentialsError,
+    WeakPasswordError,
+    create_password_user,
+    delete_user,
     ensure_cognito_user,
     global_sign_out,
+    password_login,
     refresh_tokens,
     sign_in_user,
 )
@@ -29,6 +40,8 @@ from app.schemas.auth import (
     DevTokenRequest,
     GoogleSignInRequest,
     LogoutRequest,
+    PasswordLoginRequest,
+    PasswordSignUpRequest,
     RefreshRequest,
     RefreshResponse,
     TokenResponse,
@@ -45,6 +58,9 @@ def _cognito_username_for(apple_sub: str) -> str:
     # with a backend-generated password (see cognito_admin.py), not anything
     # email-dependent like invites or password reset.
     return f"apple-{apple_sub}@users.aryapet.internal"
+
+
+_INTERNAL_EMAIL_DOMAIN = "@users.aryapet.internal"
 
 
 def _cognito_username_for_google(google_sub: str) -> str:
@@ -122,6 +138,110 @@ async def sign_in_with_apple(
         first_name=user.first_name,
         last_name=user.last_name,
     )
+
+
+def _token_response(tokens, user: User, *, is_new_user: bool) -> TokenResponse:
+    return TokenResponse(
+        id_token=tokens.id_token,
+        access_token=tokens.access_token,
+        refresh_token=tokens.refresh_token,
+        expires_in=tokens.expires_in,
+        user_id=user.id,
+        is_new_user=is_new_user,
+        email=user.email,
+        first_name=user.first_name,
+        last_name=user.last_name,
+    )
+
+
+async def _apple_account_with_email(db: AsyncSession, email: str) -> User | None:
+    result = await db.execute(
+        select(User).where(func.lower(User.email) == email, User.apple_sub.is_not(None))
+    )
+    return result.scalars().first()
+
+
+@router.post("/signup", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
+async def sign_up_with_password(
+    payload: PasswordSignUpRequest,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> TokenResponse:
+    """Creates an email + password account and signs it in.
+
+    The address isn't verified by a code yet (Cognito's confirmation flow needs SES set
+    up on the User Pool), so this proves only that the user knows the password they
+    chose - not that they own the email.
+    """
+    email = payload.email.strip().lower()
+    if email.endswith(_INTERNAL_EMAIL_DOMAIN):
+        # The synthetic usernames minted for Apple/Google users live here.
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Use a real email address.")
+    if await _apple_account_with_email(db, email) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This email already has an account that uses Sign in with Apple.",
+        )
+    try:
+        cognito_sub = await asyncio.to_thread(create_password_user, email, payload.password, settings)
+    except AccountExistsError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except WeakPasswordError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except CognitoAdminError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    try:
+        tokens = await asyncio.to_thread(password_login, email, payload.password, settings)
+        user = User(
+            cognito_username=email,
+            cognito_sub=cognito_sub,
+            email=email,
+            first_name=payload.first_name,
+            last_name=payload.last_name,
+            last_login_at=datetime.now(UTC),
+        )
+        db.add(user)
+        await db.flush()
+        await db.commit()
+    except Exception as exc:
+        # A Cognito user with no row here could never sign in, yet would block signing
+        # up again with "already exists" - undo it.
+        await db.rollback()
+        await asyncio.to_thread(delete_user, email, settings)
+        if isinstance(exc, CognitoAdminError):
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+        raise
+    return _token_response(tokens, user, is_new_user=True)
+
+
+@router.post("/login", response_model=TokenResponse)
+async def log_in_with_password(
+    payload: PasswordLoginRequest,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> TokenResponse:
+    email = payload.email.strip().lower()
+    result = await db.execute(select(User).where(User.cognito_username == email))
+    user = result.scalar_one_or_none()
+    if user is None:
+        if await _apple_account_with_email(db, email) is not None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="This email uses Sign in with Apple. Tap Continue with Apple instead.",
+            )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password.")
+
+    try:
+        tokens = await asyncio.to_thread(password_login, email, payload.password, settings)
+    except InvalidCredentialsError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+    except CognitoAdminError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    user.last_login_at = datetime.now(UTC)
+    await db.commit()
+    return _token_response(tokens, user, is_new_user=False)
 
 
 @router.post("/google", response_model=TokenResponse)

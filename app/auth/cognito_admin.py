@@ -22,6 +22,8 @@ SECRET_HASH would need to be added to every call below.
 
 IAM: the backend's execution role needs cognito-idp:AdminCreateUser,
 cognito-idp:AdminSetUserPassword, cognito-idp:AdminInitiateAuth,
+cognito-idp:AdminDeleteUser (undoing a failed email signup - best-effort, logged if
+denied),
 cognito-idp:InitiateAuth, and cognito-idp:GlobalSignOut on this User Pool's ARN. The
 latter two back refresh_tokens()/global_sign_out(), which use the public (non-admin)
 API operations — they're authorized primarily by the token being presented rather than
@@ -29,6 +31,7 @@ by caller identity, but boto3 still signs every call with the instance's IAM
 credentials, so the role needs these actions allowed too.
 """
 
+import logging
 import secrets
 import string
 from dataclasses import dataclass
@@ -38,6 +41,8 @@ import boto3
 from botocore.exceptions import ClientError
 
 from app.config import Settings
+
+logger = logging.getLogger(__name__)
 
 
 class CognitoAdminError(Exception):
@@ -171,3 +176,99 @@ def global_sign_out(access_token: str, settings: Settings) -> None:
         client.global_sign_out(AccessToken=access_token)
     except ClientError as exc:
         raise CognitoAdminError(f"Failed to sign out: {exc}") from exc
+
+
+# ── Email + password accounts ──────────────────────────────────────────────
+#
+# Unlike Apple users, these users know their password: Cognito stores and checks it.
+# Their username is their real email. Never pass one to sign_in_user() above - it
+# would overwrite their password with a random one.
+
+
+class InvalidCredentialsError(CognitoAdminError):
+    """Wrong email or password. Deliberately doesn't say which."""
+
+
+class AccountExistsError(CognitoAdminError):
+    pass
+
+
+class WeakPasswordError(CognitoAdminError):
+    """The password fails the User Pool's policy; the message says why."""
+
+
+def _tokens(response: dict[str, Any]) -> CognitoTokens:
+    result = response["AuthenticationResult"]
+    return CognitoTokens(
+        id_token=result["IdToken"],
+        access_token=result["AccessToken"],
+        refresh_token=result["RefreshToken"],
+        expires_in=result["ExpiresIn"],
+    )
+
+
+def create_password_user(email: str, password: str, settings: Settings) -> str:
+    """Creates an email + password user with the user's own password and returns its
+    Cognito `sub`. No invite email: the user just chose the password."""
+    client = _client(settings)
+    try:
+        response = client.admin_create_user(
+            UserPoolId=settings.cognito_user_pool_id,
+            Username=email,
+            UserAttributes=[
+                {"Name": "email", "Value": email},
+                # Not yet verified by a code - see the signup route.
+                {"Name": "email_verified", "Value": "true"},
+            ],
+            MessageAction="SUPPRESS",
+        )
+    except client.exceptions.UsernameExistsException as exc:
+        raise AccountExistsError("An account with this email already exists.") from exc
+    except ClientError as exc:
+        raise CognitoAdminError(f"Failed to create Cognito user: {exc}") from exc
+
+    try:
+        client.admin_set_user_password(
+            UserPoolId=settings.cognito_user_pool_id,
+            Username=email,
+            Password=password,
+            Permanent=True,
+        )
+    except client.exceptions.InvalidPasswordException as exc:
+        # Don't leave a user behind that can never sign in.
+        _try_delete(client, email, settings)
+        raise WeakPasswordError(exc.response["Error"]["Message"]) from exc
+    except ClientError as exc:
+        _try_delete(client, email, settings)
+        raise CognitoAdminError(f"Failed to set password: {exc}") from exc
+    return _extract_sub(response["User"]["Attributes"])
+
+
+def password_login(email: str, password: str, settings: Settings) -> CognitoTokens:
+    """Checks the user's own password and returns their session tokens."""
+    client = _client(settings)
+    try:
+        response = client.admin_initiate_auth(
+            UserPoolId=settings.cognito_user_pool_id,
+            ClientId=settings.cognito_app_client_id,
+            AuthFlow="ADMIN_USER_PASSWORD_AUTH",
+            AuthParameters={"USERNAME": email, "PASSWORD": password},
+        )
+    except (client.exceptions.NotAuthorizedException, client.exceptions.UserNotFoundException) as exc:
+        raise InvalidCredentialsError("Incorrect email or password.") from exc
+    except ClientError as exc:
+        raise CognitoAdminError(f"Failed to authenticate with Cognito: {exc}") from exc
+    return _tokens(response)
+
+
+def delete_user(username: str, settings: Settings) -> None:
+    """Removes a Cognito user - used to undo a signup that failed partway.
+    Best-effort: a failure is logged, never raised over the error being reported."""
+    _try_delete(_client(settings), username, settings)
+
+
+def _try_delete(client, username: str, settings: Settings) -> None:
+    try:
+        client.admin_delete_user(UserPoolId=settings.cognito_user_pool_id, Username=username)
+    except ClientError as exc:
+        logger.warning("Could not delete Cognito user %s after a failed signup: %s", username, exc)

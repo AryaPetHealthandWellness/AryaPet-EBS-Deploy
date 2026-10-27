@@ -1,6 +1,6 @@
 import uuid
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class AppleSignInRequest(BaseModel):
@@ -14,6 +14,23 @@ class AppleSignInRequest(BaseModel):
     # later sign-in, so only used to backfill a user row that doesn't have a name yet.
     first_name: str | None = None
     last_name: str | None = None
+
+
+# Shape only (something@domain.tld); whether the address is real is a separate check.
+_EMAIL_PATTERN = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+
+
+class PasswordSignUpRequest(BaseModel):
+    email: str = Field(pattern=_EMAIL_PATTERN, max_length=320)
+    # Checked by the Cognito User Pool's password policy, which explains any refusal.
+    password: str = Field(min_length=8, max_length=256)
+    first_name: str | None = None
+    last_name: str | None = None
+
+
+class PasswordLoginRequest(BaseModel):
+    email: str = Field(pattern=_EMAIL_PATTERN, max_length=320)
+    password: str = Field(min_length=1, max_length=256)
 
 
 class GoogleSignInRequest(BaseModel):
