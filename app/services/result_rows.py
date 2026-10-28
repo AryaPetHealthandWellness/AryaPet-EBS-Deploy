@@ -221,11 +221,34 @@ def _row(name: str, value: str, reference: str, unit: str, flag: str | None) -> 
     }
 
 
+_GRID_TOKEN_RE = re.compile(r"(?<!\S)[|¦│](?!\S)")
+_LONE_BAR_RE = re.compile(r"(?<!\S)[Il](?!\S)")
+_NUMERIC_TOKEN_RE = re.compile(r"[<>]?[\dOo.,\-–—~]+")
+
+
+def ocr_clean_line(line: str) -> str:
+    """Undoes what OCR does to a photographed table: cell borders read as "|" (or,
+    repeated across a row, as "I"/"l"), and the letter O in place of a zero inside
+    numbers ("O.O202682", "1O.5"). Keep in step with `ResultRows.ocrCleanLine` in the
+    app (AryaPet-MVP lib/features/scanner/result_rows.dart)."""
+    line = _GRID_TOKEN_RE.sub(" ", line.strip())
+    if len(_LONE_BAR_RE.findall(line)) >= 2:
+        line = _LONE_BAR_RE.sub(" ", line)
+
+    def fix(token: str) -> str:
+        if _NUMERIC_TOKEN_RE.fullmatch(token) and re.search(r"[Oo]", token) and re.search(r"[\d.]", token):
+            return re.sub(r"[Oo]", "0", token)
+        return token
+
+    line = "".join(fix(t) for t in re.split(r"(\s+)", line))
+    return re.sub(r"\s{3,}", "  ", line).strip()
+
+
 def parse_result_line(line: str) -> dict[str, Any] | None:
     """The parts of a "name value [unit] [range] [flag]" line, or None when it isn't
     shaped like one. `value` is None for a "name range" line whose value was printed on
     the next line. Whether the row is believable is left to `has_evidence`."""
-    line = line.strip()
+    line = ocr_clean_line(line)
     if ":" in line or "=" in line or len(line) > 120 or _DATE_RE.search(line):
         return None
 
@@ -286,13 +309,15 @@ def parse_result_line(line: str) -> dict[str, Any] | None:
         rest = rest[: unit_match.start()] + " " + rest[unit_match.end() :]
 
     # Whatever is left must be noise, not more words - otherwise it's a sentence.
+    # A lone letter is noise (a misread "0" or cell border), not a word.
     leftover = [w for w in rest.split() if any(c.isalpha() for c in w)]
-    if len(leftover) > 1:
+    words = [w for w in leftover if len(w) > 1 and not _FLAG_TOKEN_RE.fullmatch(w)]
+    if len(words) > 1:
         return None
-    if flag is None and leftover and _FLAG_TOKEN_RE.fullmatch(leftover[0]):
+    if flag is None:
         # Analyzer exports print the flag in its own column mid-row:
         # "ALB  2.4  1.50  1.49  L  3.2--4.3  g/dL".
-        flag = leftover[0]
+        flag = next((w for w in leftover if _FLAG_TOKEN_RE.fullmatch(w)), None)
     if value is None and not reference:
         return None
 

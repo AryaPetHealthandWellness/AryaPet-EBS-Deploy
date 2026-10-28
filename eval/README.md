@@ -32,6 +32,7 @@ How we make report extraction exact, one measured change at a time.
 | 2 | Document type: imaging (ultrasonography, echo, radiograph) is `other`, stool tests are `lab_report`; the printed heading counts as a title signal | 145/147 (98.6%) |
 | 3 | Procedures reported as done in the notes ("Antiseptic dressing done today."); provider read from a lab's own conditions ("Neither DiagnoPet, nor its ...") | 147/147 (100%) |
 | 4 | **Photos.** A range's lower bound was read as the value when columns were two spaces apart (photo text): "ALT  14-111" gave ALT = 14. Decimal ranges such as "12.8-53.5" and "6.0-17.0" were read as dates, and their rows dropped. The app now turns tilted photos upright before rebuilding rows, using each line's angle from Vision (ported here as `layout_text_from_blocks`). Tilt cases added: 4 real pages at -4°, 0°, 3°, 6° and 10°. | 557/557 (100%) |
+| 5 | **OCR misreads in photographed tables.** Cell borders read as "\|" or "I", and zeros read as the letter O ("O.O447923"), dropped whole rows: 4 of 24 on a chemistry-analyzer table, and all 24 when borders came out as "I". A lone letter left in a row no longer makes it a sentence, and a mid-row H/L flag is found wherever it sits. | 557/557 (100%) |
 
 All 40 sample LFT/KFT reports in `tests/dummy_reports/`: every printed number is
 extracted.

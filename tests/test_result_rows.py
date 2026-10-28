@@ -103,3 +103,16 @@ def test_sections_split_by_title_and_trust_rows_under_a_header():
         ("Urine Routine Examination", ["Glucose"]),
         ("Thyroid Profile", ["TSH"]),
     ]
+
+
+def test_photographed_table_with_ocr_misreads():
+    # Vision reads a bordered table's cell borders as "|" or "I" and some zeros as
+    # the letter O. Every row must survive.
+    assert _parts("TB | O.O | O.O447923 | 0.0004604 | L | 0.2--1.2 | mg/dL") == (
+        "TB", "0.0", "mg/dL", "0.2--1.2", "L",
+    )
+    assert _parts("GGT I 4 I 0.4767243 I 0.0012547 I L I 7--32 I U/L") == ("GGT", "4", "U/L", "7--32", "L")
+    assert _parts("LDL  15  O  L  19--121  mg/dL") == ("LDL", "15", "mg/dL", "19--121", "L")
+    assert _parts("GLOB  3.4  O  2.0--4.0  g/dL")[:2] == ("GLOB", "3.4")
+    # A row of real words is still a sentence, not a result.
+    assert parse_result_line("Sample was haemolysed 2 hours after collection") is None
