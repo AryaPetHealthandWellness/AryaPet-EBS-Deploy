@@ -201,7 +201,12 @@ def is_abnormal(value: str, reference: str, flag: str | None = None) -> bool | N
     if bounds is None or number is None:
         return None
     low, high = bounds
-    return (low is not None and number < low) or (high is not None and number > high)
+    # "< 1.00" against 1.00-11.00 is below the range; "> 462" against 0-199 above it.
+    below = value.strip().startswith(("<", "≤"))
+    above = value.strip().startswith((">", "≥"))
+    return (low is not None and (number < low or (below and number <= low))) or (
+        high is not None and (number > high or (above and number >= high))
+    )
 
 
 def _row(name: str, value: str, reference: str, unit: str, flag: str | None) -> dict[str, Any]:
@@ -379,6 +384,11 @@ def row_from_cells(cells: list[str], roles: dict[str, int]) -> dict[str, Any] | 
     flag = cell("flag") or None
     if flag and not re.fullmatch(r"H|L|HH|LL|High|Low|\*|↑|↓", flag, re.IGNORECASE):
         flag = None
+    if "flag" not in roles:
+        # Analyzers print H/L in a column with no heading of its own.
+        claimed = set(roles.values())
+        loose = [(c or "").strip() for i, c in enumerate(cells) if i not in claimed]
+        flag = next((c for c in loose if _FLAG_TOKEN_RE.fullmatch(c)), None)
     return _row(name, value, reference, unit, flag)
 
 

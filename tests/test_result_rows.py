@@ -116,3 +116,20 @@ def test_photographed_table_with_ocr_misreads():
     assert _parts("GLOB  3.4  O  2.0--4.0  g/dL")[:2] == ("GLOB", "3.4")
     # A row of real words is still a sentence, not a result.
     assert parse_result_line("Sample was haemolysed 2 hours after collection") is None
+
+
+def test_flag_in_a_column_without_a_heading():
+    # Analyzer printouts: "Assay  Result  Absorbance  Reactivity  [blank]  Ref  Unit".
+    roles = header_roles(["Assay", "Result", "Absorbance", "Reactivity", "", "Ref", "Unit"])
+    row = row_from_cells(["TB", "0.2", "0.0700232", "0.0052545", "L", "0.2--1.2", "mg/dL"], roles)
+    assert (row["value"], row["flag"], row["abnormal"]) == ("0.2", "L", True)
+    row = row_from_cells(["AST", "48", "1.1188877", "0.0110518", "", "18--56", "U/L"], roles)
+    assert (row["flag"], row["abnormal"]) == (None, False)
+
+
+def test_censored_values_at_the_range_edge_are_out_of_range():
+    from app.services.result_rows import is_abnormal
+
+    assert is_abnormal("< 1.00", "1.00-11.00") is True
+    assert is_abnormal("> 462", "0-199") is True
+    assert is_abnormal("< 5", "0-10") is False

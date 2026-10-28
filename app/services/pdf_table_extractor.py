@@ -26,6 +26,7 @@ the only option for photographed documents, which have no PDF geometry at all.
 
 import io
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from app.services.result_rows import (
@@ -98,15 +99,33 @@ def _title_above(page: Any, top: float) -> str | None:
     return None
 
 
-def _sections_from_cell_rows(rows: list[list[str]], title: str | None) -> list[dict[str, Any]]:
-    """Rows of one grid read top to bottom. A grid can hold several panels - a title row
-    ("KIDNEY FUNCTION TEST") and a fresh header row partway down start the next one."""
-    if not any(header_roles(row) for row in rows):
+@dataclass
+class _Carried:
+    """The header of the last table read, for a continuation on the next page."""
+
+    roles: dict[str, int]
+    width: int
+    title: str | None
+
+
+def _sections_from_cell_rows(
+    rows: list[list[str]], title: str | None, carried: _Carried | None = None
+) -> tuple[list[dict[str, Any]], _Carried | None]:
+    """Rows of one grid read top to bottom, and the header in force at the end. A grid
+    can hold several panels - a title row ("KIDNEY FUNCTION TEST") and a fresh header
+    row partway down start the next one. A grid with no header of its own that has the
+    same columns as the one before is that table carried over onto the next page, so it
+    keeps that table's header."""
+    width = max((len(row) for row in rows), default=0)
+    has_header = any(header_roles(row) for row in rows)
+    if not has_header and not (carried and carried.width == width):
         parameters = _rows_to_parameters(rows)
-        return [{"title": title, "parameters": parameters}] if parameters else []
+        return ([{"title": title, "parameters": parameters}] if parameters else []), None
 
     sections: list[dict[str, Any]] = []
     roles: dict[str, int] | None = None
+    if not has_header and carried:
+        roles, title = carried.roles, title or carried.title
     for row in rows:
         filled = [cell for cell in row if cell]
         if len(filled) == 1 and is_panel_title(filled[0]):
@@ -124,14 +143,19 @@ def _sections_from_cell_rows(rows: list[list[str]], title: str | None) -> list[d
         if not sections or sections[-1]["title"] != title:
             sections.append({"title": title, "parameters": []})
         sections[-1]["parameters"].append(parameter)
-    return sections
+    return sections, (_Carried(roles, width, title) if roles else None)
 
 
-def _sections_from_ruled_tables(page: Any) -> list[dict[str, Any]]:
+def _sections_from_ruled_tables(
+    page: Any, carried: _Carried | None = None
+) -> tuple[list[dict[str, Any]], _Carried | None]:
     sections = []
     for table in page.find_tables({"vertical_strategy": "lines", "horizontal_strategy": "lines"}):
-        sections.extend(_sections_from_cell_rows(_clean(table.extract()), _title_above(page, table.bbox[1])))
-    return sections
+        found, carried = _sections_from_cell_rows(
+            _clean(table.extract()), _title_above(page, table.bbox[1]), carried
+        )
+        sections.extend(found)
+    return sections, carried
 
 
 # ── Tier 2: word positions ─────────────────────────────────────────────────
@@ -253,8 +277,9 @@ def extract_lab_sections_from_pdf(pdf_bytes: bytes) -> tuple[list[dict[str, Any]
     clustered: list[dict[str, Any]] = []
 
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        carried: _Carried | None = None
         for page in pdf.pages:
-            page_ruled = _sections_from_ruled_tables(page)
+            page_ruled, carried = _sections_from_ruled_tables(page, carried)
             if page_ruled:
                 ruled.extend(page_ruled)
                 continue

@@ -107,3 +107,15 @@ def test_feline_pdf_reads_feline_ranges():
     alt = next(p for s in sections for p in s["parameters"] if p["name"] == "ALT")
 
     assert alt["reference_range"] == "12 - 130"
+
+
+def test_a_table_continued_on_the_next_page_keeps_its_header():
+    from app.services.pdf_table_extractor import _sections_from_cell_rows
+
+    header = ["Assay", "Result", "Absorbance", "Reactivity", "", "Ref", "Unit"]
+    page1 = [header, ["HDL", "126", "1.11", "1.98", "H", "50--60", "mg/dL"]]
+    page2 = [["IBIL", "2.1", "", "0", "", "0.0--17.0", "umol/L"], ["", "", "", "", "", "", ""]]
+    _, carried = _sections_from_cell_rows(page1, None)
+    sections, _ = _sections_from_cell_rows(page2, None, carried)
+    (ibil,) = sections[0]["parameters"]
+    assert (ibil["value"], ibil["reference_range"], ibil["unit_text"]) == ("2.1", "0.0-17.0", "umol/L")
